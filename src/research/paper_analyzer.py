@@ -8,13 +8,45 @@ Uses Groq API (OpenAI-compatible) for fast inference.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 import openai
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from src.config import Settings
 from src.prompts.obsidian_skill import OBSIDIAN_FORMATTING_SKILL
+
+
+# ── Pydantic models for structured LLM output ────────────────────────────────
+
+class TriageItem(BaseModel):
+    """Relevance classification for a single paper."""
+
+    arxiv_id: str
+    relevance: Literal["high", "medium", "low"]
+
+
+class TriageResponse(BaseModel):
+    """Wrapper for the triage response array."""
+
+    papers: list[TriageItem]
+
+
+class AnalysisItem(BaseModel):
+    """Full analysis of a single paper."""
+
+    arxiv_id: str
+    summary: str = Field(default="", description="2-3 sentence summary in Spanish")
+    conclusions: str = Field(default="", description="Bullet points separated by newlines")
+    contributions: str = Field(default="", description="Bullet points separated by newlines")
+    key_takeaways: str = Field(default="", description="2-3 actionable bullet points")
+
+
+class AnalysisResponse(BaseModel):
+    """Wrapper for the analysis response array."""
+
+    papers: list[AnalysisItem]
 
 # ── Research interests (used to judge relevance) ─────────────────────────
 
@@ -29,12 +61,14 @@ RESEARCH_INTERESTS = """\
 _TRIAGE_SYSTEM = f"""Score each paper's relevance to these interests:
 {RESEARCH_INTERESTS}
 
-Return ONLY a JSON array. Each element: {{"arxiv_id":"...","relevance":"high"|"medium"|"low"}}
-No markdown fences."""
+Return a JSON object with a "papers" key containing an array.
+Each element: {{"arxiv_id":"...","relevance":"high"|"medium"|"low"}}
+Example: {{"papers": [{{"arxiv_id": "2503.00001", "relevance": "high"}}]}}"""
 
 # ── Phase 2: full analysis (only for relevant papers) ─────────────────────────
 
-_ANALYSIS_SYSTEM = f"""Analyze each paper. For each one produce a JSON object with:
+_ANALYSIS_SYSTEM = f"""Analyze each paper. Return a JSON object with a "papers" key containing an array.
+Each element must have:
 - arxiv_id: string
 - summary: 2-3 sentences (Spanish)
 - conclusions: bullet points (Spanish, separated by \\n)
@@ -42,7 +76,8 @@ _ANALYSIS_SYSTEM = f"""Analyze each paper. For each one produce a JSON object wi
 - key_takeaways: 2-3 actionable bullet points (Spanish, separated by \\n)
 
 Use [[wiki-links]] for key concepts, **bold** for important terms.
-Return ONLY a JSON array. No markdown fences. Write in Spanish.
+Example: {{"papers": [{{"arxiv_id": "...", "summary": "...", "conclusions": "...", "contributions": "...", "key_takeaways": "..."}}]}}
+Write in Spanish.
 
 {OBSIDIAN_FORMATTING_SKILL}"""
 
@@ -131,16 +166,21 @@ def _paper_snippet(p: dict[str, Any], abstract_limit: int = _ABSTRACT_LIMIT) -> 
     return f"{p.get('arxiv_id','')}: [{cats}] {p.get('title','')}. {abstract}"
 
 
-def _parse_json_response(content: str) -> list[dict[str, Any]]:
-    """Parse LLM JSON response, stripping markdown fences if present."""
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1] if "\n" in content else content
-    if content.endswith("```"):
-        content = content.rsplit("```", 1)[0]
-    content = content.strip()
-    result = json.loads(content)
-    return result if isinstance(result, list) else [result]
+def _parse_triage(content: str) -> list[TriageItem]:
+    """Parse & validate triage JSON via Pydantic."""
+    data = json.loads(content)
+    # Handle both {"papers": [...]} and bare [...]
+    if isinstance(data, list):
+        data = {"papers": data}
+    return TriageResponse.model_validate(data).papers
+
+
+def _parse_analysis(content: str) -> list[AnalysisItem]:
+    """Parse & validate analysis JSON via Pydantic."""
+    data = json.loads(content)
+    if isinstance(data, list):
+        data = {"papers": data}
+    return AnalysisResponse.model_validate(data).papers
 
 
 async def _triage_batch(
@@ -157,11 +197,13 @@ async def _triage_batch(
                 {"role": "system", "content": _TRIAGE_SYSTEM},
                 {"role": "user", "content": papers_text},
             ],
-            max_tokens=1024,  # triage output is tiny
+            max_tokens=1024,
+            response_format={"type": "json_object"},
         )
-        return _parse_json_response(response.choices[0].message.content or "[]")
-    except json.JSONDecodeError as exc:
-        logger.warning("Triage JSON parse failed: {}", exc)
+        items = _parse_triage(response.choices[0].message.content or '{"papers":[]}')
+        return [item.model_dump() for item in items]
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning("Triage parse/validation failed: {}", exc)
         return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
     except Exception as exc:
         logger.error("Triage LLM call failed: {}", exc)
@@ -188,10 +230,12 @@ async def _analysis_batch(
                 {"role": "user", "content": f"Analyze:\n{papers_text}"},
             ],
             max_tokens=4096,
+            response_format={"type": "json_object"},
         )
-        return _parse_json_response(response.choices[0].message.content or "[]")
-    except json.JSONDecodeError as exc:
-        logger.warning("Analysis JSON parse failed: {}", exc)
+        items = _parse_analysis(response.choices[0].message.content or '{"papers":[]}')
+        return [item.model_dump() for item in items]
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning("Analysis parse/validation failed: {}", exc)
         return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
                  "summary": "", "conclusions": "",
                  "contributions": "", "key_takeaways": ""} for p in papers]
