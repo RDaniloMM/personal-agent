@@ -16,63 +16,52 @@ from loguru import logger
 from src.config import Settings
 from src.prompts.obsidian_skill import OBSIDIAN_FORMATTING_SKILL
 
-# ── Research interests (used to judge relevance) ─────────────────────────────
+# ── Research interests (used to judge relevance) ─────────────────────────
 
-RESEARCH_INTERESTS = """
-- AI agents and agentic systems
-- Autonomous agent architectures (planning, tool-use, memory)
-- LLM evaluation and benchmarks
-- Agent evaluation frameworks and metrics
-- Function calling / tool calling in LLMs
-- Multi-agent systems
-- Retrieval-augmented generation (RAG)
-- Prompt engineering and reasoning strategies
-"""
+RESEARCH_INTERESTS = """\
+- AI agents / agentic systems / autonomous architectures
+- LLM evaluation, benchmarks, agent evaluation
+- Function/tool calling in LLMs
+- Multi-agent systems"""
 
-# ── System prompt for relevance + extraction ─────────────────────────────────
+# ── Phase 1: quick relevance triage (cheap – small output) ────────────────────
 
-_SYSTEM = f"""You are a research paper analyst. The user's research interests are:
-
+_TRIAGE_SYSTEM = f"""Score each paper's relevance to these interests:
 {RESEARCH_INTERESTS}
 
-For each paper provided, you MUST:
-1. Evaluate how relevant it is to the user's interests above.
-2. Assign a relevance score: "high", "medium", or "low".
-3. For papers scored "high" or "medium", extract:
-   - summary: A concise 2-3 sentence summary in Spanish
-   - conclusions: The main conclusions / findings (in Spanish, bullet points)
-   - contributions: What's novel or the key contributions (in Spanish, bullet points)
-   - key_takeaways: 2-3 actionable takeaways for the user (in Spanish)
-4. For "low" relevance papers, still provide a 1-sentence summary.
+Return ONLY a JSON array. Each element: {{"arxiv_id":"...","relevance":"high"|"medium"|"low"}}
+No markdown fences."""
 
-Respond with ONLY valid JSON (no markdown fences). Return an array of objects, one per paper.
-Each object has:
+# ── Phase 2: full analysis (only for relevant papers) ─────────────────────────
+
+_ANALYSIS_SYSTEM = f"""Analyze each paper. For each one produce a JSON object with:
 - arxiv_id: string
-- relevance: "high" | "medium" | "low"
-- summary: string
-- conclusions: string (bullet points with \\n)
-- contributions: string (bullet points with \\n)
-- key_takeaways: string (bullet points with \\n)
+- summary: 2-3 sentences (Spanish)
+- conclusions: bullet points (Spanish, separated by \\n)
+- contributions: bullet points (Spanish, separated by \\n)
+- key_takeaways: 2-3 actionable bullet points (Spanish, separated by \\n)
 
-Write ALL analysis text in Spanish.
+Use [[wiki-links]] for key concepts, **bold** for important terms.
+Return ONLY a JSON array. No markdown fences. Write in Spanish.
 
-{OBSIDIAN_FORMATTING_SKILL}
+{OBSIDIAN_FORMATTING_SKILL}"""
 
-IMPORTANTE: En los campos de texto (summary, conclusions, contributions, key_takeaways),
-usa formato Obsidian: incluye [[wiki-links]], **negrita** para conceptos clave,
-callouts donde sea relevante, y tags inline como #paper o #ia/agentes."""
+# Max abstract chars sent to the LLM per paper
+_ABSTRACT_LIMIT = 300
 
-# ── Batch size for LLM calls (avoid context overflow) ────────────────────────
-_BATCH_SIZE = 10
+# ── Batch sizes ──────────────────────────────────────────────────────────────
+_TRIAGE_BATCH = 20   # triage is cheap – bigger batches
+_ANALYSIS_BATCH = 8  # full analysis – smaller batches
 
 
 async def analyze_papers(
     papers: list[dict[str, Any]], settings: Settings
 ) -> list[dict[str, Any]]:
-    """Analyze a list of papers for relevance and extract key points.
+    """Two-phase analysis: cheap triage → full analysis on relevant only.
 
-    Returns a list of analysis dicts keyed by arxiv_id, merged with original
-    paper data. Only papers with "high" or "medium" relevance are returned.
+    Phase 1 (triage): classify all papers as high/medium/low with a small prompt.
+    Phase 2 (analysis): generate full summaries only for high+medium papers.
+    This saves ~60-80% of output tokens compared to the single-pass approach.
     """
     if not papers:
         return []
@@ -81,106 +70,133 @@ async def analyze_papers(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
     )
+
+    # ── Phase 1: Triage (cheap) ───────────────────────────────────
+    relevance_map: dict[str, str] = {}
+    for i in range(0, len(papers), _TRIAGE_BATCH):
+        batch = papers[i : i + _TRIAGE_BATCH]
+        triage = await _triage_batch(batch, client, settings)
+        for t in triage:
+            relevance_map[t["arxiv_id"]] = t.get("relevance", "low")
+
+    relevant_papers = [
+        p for p in papers
+        if relevance_map.get(p.get("arxiv_id", ""), "low") in ("high", "medium")
+    ]
+
+    high_count = sum(1 for v in relevance_map.values() if v == "high")
+    medium_count = sum(1 for v in relevance_map.values() if v == "medium")
+    low_count = sum(1 for v in relevance_map.values() if v == "low")
+    logger.info(
+        "Triage: {} high, {} medium, {} low → {} to analyze",
+        high_count, medium_count, low_count, len(relevant_papers),
+    )
+
+    if not relevant_papers:
+        return []
+
+    # ── Phase 2: Full analysis (only relevant) ────────────────────
     all_analyses: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(relevant_papers), _ANALYSIS_BATCH):
+        batch = relevant_papers[i : i + _ANALYSIS_BATCH]
+        analyses = await _analysis_batch(batch, client, settings)
+        for a in analyses:
+            all_analyses[a["arxiv_id"]] = a
 
-    # Process in batches
-    for i in range(0, len(papers), _BATCH_SIZE):
-        batch = papers[i : i + _BATCH_SIZE]
-        batch_analyses = await _analyze_batch(batch, client, settings)
-        for analysis in batch_analyses:
-            all_analyses[analysis["arxiv_id"]] = analysis
-
-    # Merge analysis into original paper data, filter by relevance
+    # Merge analysis + relevance back into original paper data
     enriched: list[dict[str, Any]] = []
-    high_count = 0
-    medium_count = 0
-    low_count = 0
-
-    for paper in papers:
+    for paper in relevant_papers:
         aid = paper.get("arxiv_id", "")
         analysis = all_analyses.get(aid, {})
-        relevance = analysis.get("relevance", "low")
-
-        if relevance == "high":
-            high_count += 1
-        elif relevance == "medium":
-            medium_count += 1
-        else:
-            low_count += 1
-
-        if relevance in ("high", "medium"):
-            enriched_paper = {**paper, **analysis}
-            enriched.append(enriched_paper)
+        enriched.append({
+            **paper,
+            **analysis,
+            "relevance": relevance_map.get(aid, "medium"),
+        })
 
     logger.info(
-        "Paper analysis: {} high, {} medium, {} low → {} relevant",
+        "Paper analysis complete: {} high, {} medium, {} low → {} enriched",
         high_count, medium_count, low_count, len(enriched),
     )
     return enriched
 
 
-async def _analyze_batch(
+# ── Phase helpers ────────────────────────────────────────────────────────────
+
+
+def _paper_snippet(p: dict[str, Any], abstract_limit: int = _ABSTRACT_LIMIT) -> str:
+    """Compact text repr of a paper for the LLM."""
+    abstract = (p.get("abstract", "") or "")[:abstract_limit]
+    cats = ",".join(p.get("categories", []))
+    return f"{p.get('arxiv_id','')}: [{cats}] {p.get('title','')}. {abstract}"
+
+
+def _parse_json_response(content: str) -> list[dict[str, Any]]:
+    """Parse LLM JSON response, stripping markdown fences if present."""
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content
+    if content.endswith("```"):
+        content = content.rsplit("```", 1)[0]
+    content = content.strip()
+    result = json.loads(content)
+    return result if isinstance(result, list) else [result]
+
+
+async def _triage_batch(
     papers: list[dict[str, Any]],
     client: openai.AsyncOpenAI,
     settings: Settings,
 ) -> list[dict[str, Any]]:
-    """Send a batch of papers to the LLM for analysis."""
-    papers_text = "\n\n".join(
-        f"---\narxiv_id: {p.get('arxiv_id', '')}\n"
-        f"title: {p.get('title', '')}\n"
-        f"categories: {', '.join(p.get('categories', []))}\n"
-        f"abstract: {p.get('abstract', '')}\n---"
-        for p in papers
-    )
-
+    """Phase 1: quick relevance classification. Minimal tokens."""
+    papers_text = "\n".join(_paper_snippet(p) for p in papers)
     try:
         response = await client.chat.completions.create(
             model=settings.llm_model,
             messages=[
-                {"role": "system", "content": _SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Analyze these {len(papers)} papers:\n\n{papers_text}"
-                    ),
-                },
+                {"role": "system", "content": _TRIAGE_SYSTEM},
+                {"role": "user", "content": papers_text},
             ],
-            max_tokens=8192,
+            max_tokens=1024,  # triage output is tiny
         )
-
-        content = response.choices[0].message.content or "[]"
-
-        # Strip markdown fences if present
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1] if "\n" in content else content
-        if content.endswith("```"):
-            content = content.rsplit("```", 1)[0]
-        content = content.strip()
-
-        analyses = json.loads(content)
-        if not isinstance(analyses, list):
-            analyses = [analyses]
-
-        return analyses
-
+        return _parse_json_response(response.choices[0].message.content or "[]")
     except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse LLM analysis JSON: {}", exc)
-        # Mark as low so they don't get written with broken content;
-        # next run will re-try analysis for papers without notes.
-        return [
-            {"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
-             "summary": "", "conclusions": "",
-             "contributions": "", "key_takeaways": ""}
-            for p in papers
-        ]
+        logger.warning("Triage JSON parse failed: {}", exc)
+        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
     except Exception as exc:
-        logger.error("LLM paper analysis failed: {}", exc)
-        # Return low relevance so these papers are skipped for writing;
-        # they will be re-collected and re-analyzed on the next run.
-        return [
-            {"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
-             "summary": "", "conclusions": "",
-             "contributions": "", "key_takeaways": ""}
-            for p in papers
-        ]
+        logger.error("Triage LLM call failed: {}", exc)
+        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low"} for p in papers]
+
+
+async def _analysis_batch(
+    papers: list[dict[str, Any]],
+    client: openai.AsyncOpenAI,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    """Phase 2: full analysis of already-triaged relevant papers."""
+    papers_text = "\n\n".join(
+        f"---\narxiv_id: {p.get('arxiv_id', '')}\n"
+        f"title: {p.get('title', '')}\n"
+        f"abstract: {(p.get('abstract', '') or '')[:500]}\n---"
+        for p in papers
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": _ANALYSIS_SYSTEM},
+                {"role": "user", "content": f"Analyze:\n{papers_text}"},
+            ],
+            max_tokens=4096,
+        )
+        return _parse_json_response(response.choices[0].message.content or "[]")
+    except json.JSONDecodeError as exc:
+        logger.warning("Analysis JSON parse failed: {}", exc)
+        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
+                 "summary": "", "conclusions": "",
+                 "contributions": "", "key_takeaways": ""} for p in papers]
+    except Exception as exc:
+        logger.error("Analysis LLM call failed: {}", exc)
+        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
+                 "summary": "", "conclusions": "",
+                 "contributions": "", "key_takeaways": ""} for p in papers]

@@ -15,7 +15,7 @@ Cada nota inicia con un bloque YAML delimitado por `---`:
 ---
 title: Título de la nota
 date: 2025-01-15
-tags: [#paper, #ia, #agentes]
+tags: [paper, ia, agentes]
 ---
 ```
 

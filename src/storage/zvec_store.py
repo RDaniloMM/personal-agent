@@ -63,6 +63,26 @@ def embed_texts(texts: list[str], settings: Settings) -> list[list[float]]:
 
     return all_embeddings
 
+# ── Lookup helpers ────────────────────────────────────────────────────────────
+
+def get_existing_ids(
+    collection_name: str,
+    settings: Settings,
+) -> set[str]:
+    """Return the set of document IDs already stored in a collection."""
+    if collection_name not in _COLLECTIONS:
+        raise ValueError(f"Unknown collection: {collection_name}")
+
+    conn = _get_connection(settings)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT id FROM {collection_name}")
+            return {row[0] for row in cur.fetchall()}
+    except Exception as exc:
+        logger.warning("Could not fetch existing IDs from '{}': {}", collection_name, exc)
+        return set()
+    finally:
+        conn.close()
 
 # ── CRUD operations ──────────────────────────────────────────────────────────
 

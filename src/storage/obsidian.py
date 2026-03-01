@@ -93,14 +93,6 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
 
     body = f"""{fm}
 
-# {paper.get('title', '')}
-
-**Authors:** {', '.join(authors[:5])}{'…' if len(authors) > 5 else ''}
-**Published:** {paper.get('published', 'N/A')}
-**PDF:** [Link]({paper.get('pdf_url', '')})
-**Categories:** {', '.join(paper.get('categories', []))}
-**Relevancia:** {relevance.upper()}
-
 ## Resumen
 
 {summary if summary else paper.get('abstract', '')}
