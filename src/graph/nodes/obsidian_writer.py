@@ -92,8 +92,22 @@ async def write_obsidian_node(state: AgentState) -> dict:
         write_youtube_summary,
     )
 
-    # Paper notes
-    for paper in state.arxiv_papers:
+    # Paper notes — first analyze with LLM, then write only relevant ones
+    papers_to_write = state.arxiv_papers
+    if state.arxiv_papers:
+        try:
+            from src.research.paper_analyzer import analyze_papers
+
+            analyzed = await analyze_papers(state.arxiv_papers, settings)
+            logger.info(
+                "LLM classified {}/{} papers as relevant",
+                len(analyzed), len(state.arxiv_papers),
+            )
+            papers_to_write = analyzed
+        except Exception as exc:
+            logger.warning("Paper analysis failed, writing all papers raw: {}", exc)
+
+    for paper in papers_to_write:
         try:
             path = write_arxiv_paper(paper, settings)
             notes.append(path)
@@ -160,7 +174,6 @@ async def _extract_ideas_with_llm(
         ],
         tools=_TOOLS,
         tool_choice="auto",
-        temperature=0.7,
         max_completion_tokens=4096,
     )
 

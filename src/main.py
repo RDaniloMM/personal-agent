@@ -7,7 +7,6 @@ import sys
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from src.config import get_settings
@@ -102,8 +101,8 @@ def main() -> None:
         settings.scrape_hours_list,
     )
     logger.info(
-        "  Arxiv collection every {} hours",
-        settings.arxiv_interval_hours,
+        "  Arxiv collection at hour {}",
+        settings.arxiv_hour,
     )
 
     scheduler = AsyncIOScheduler()
@@ -118,10 +117,10 @@ def main() -> None:
         replace_existing=True,
     )
 
-    # Arxiv: every N hours
+    # Arxiv: once per day at configured hour
     scheduler.add_job(
         job_collect_arxiv,
-        IntervalTrigger(hours=settings.arxiv_interval_hours),
+        CronTrigger(hour=settings.arxiv_hour),
         id="collect_arxiv",
         name="Arxiv paper collection",
         replace_existing=True,

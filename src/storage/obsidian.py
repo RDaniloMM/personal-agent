@@ -38,7 +38,7 @@ def _safe_filename(text: str, max_len: int = 80) -> str:
 
 
 def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
-    """Write a single Arxiv paper as a Markdown note.
+    """Write a single Arxiv paper as a Markdown note with LLM analysis.
 
     Returns the path of the created file.
     """
@@ -50,6 +50,7 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
         logger.debug("Paper note already exists: {}", filepath.name)
         return str(filepath)
 
+    relevance = paper.get("relevance", "unknown")
     authors = paper.get("authors", [])
     fm = _frontmatter(
         {
@@ -59,10 +60,17 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
             "published": paper.get("published", ""),
             "pdf_url": paper.get("pdf_url", ""),
             "categories": paper.get("categories", []),
-            "tags": ["#paper", "#arxiv", "#ai-research"],
+            "relevance": relevance,
+            "tags": ["#paper", "#arxiv", "#ai-research", f"#relevance-{relevance}"],
             "created": datetime.now(UTC).strftime("%Y-%m-%d"),
         }
     )
+
+    # Build analysis sections from LLM output
+    summary = paper.get("summary", "")
+    conclusions = paper.get("conclusions", "")
+    contributions = paper.get("contributions", "")
+    key_takeaways = paper.get("key_takeaways", "")
 
     body = f"""{fm}
 
@@ -72,16 +80,29 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
 **Published:** {paper.get('published', 'N/A')}
 **PDF:** [Link]({paper.get('pdf_url', '')})
 **Categories:** {', '.join(paper.get('categories', []))}
+**Relevancia:** {relevance.upper()}
 
-## Abstract
+## Resumen
+
+{summary if summary else paper.get('abstract', '')}
+
+## Abstract original
 
 {paper.get('abstract', '')}
 
-## Key Ideas
+## Conclusiones
 
-> _Pending LLM analysis_
+{conclusions if conclusions else '> _Sin análisis_'}
 
-## Notes
+## Aportes clave
+
+{contributions if contributions else '> _Sin análisis_'}
+
+## Puntos importantes
+
+{key_takeaways if key_takeaways else '> _Sin análisis_'}
+
+## Notas
 
 """
     filepath.write_text(body, encoding="utf-8")
