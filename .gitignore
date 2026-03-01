@@ -28,7 +28,11 @@ Thumbs.db
 # Logs
 *.log
 logs/
-.tmp-personal-agent-images.tar096507291
+
+# Docker temp files
+*.tar*
+.tmp-*
+
 # Distribution
 dist/
 build/
