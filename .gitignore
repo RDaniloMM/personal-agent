@@ -33,6 +33,9 @@ logs/
 *.tar*
 .tmp-*
 
+# ONNX model cache
+.models/
+
 # Distribution
 dist/
 build/
