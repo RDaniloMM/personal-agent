@@ -187,27 +187,45 @@ async def _triage_batch(
     papers: list[dict[str, Any]],
     client: openai.AsyncOpenAI,
     settings: Settings,
+    *,
+    _retries: int = 2,
 ) -> list[dict[str, Any]]:
     """Phase 1: quick relevance classification. Minimal tokens."""
+    import asyncio
+
     papers_text = "\n".join(_paper_snippet(p) for p in papers)
-    try:
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": _TRIAGE_SYSTEM},
-                {"role": "user", "content": papers_text},
-            ],
-            max_tokens=1024,
-            response_format={"type": "json_object"},
-        )
-        items = _parse_triage(response.choices[0].message.content or '{"papers":[]}')
-        return [item.model_dump() for item in items]
-    except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning("Triage parse/validation failed: {}", exc)
-        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
-    except Exception as exc:
-        logger.error("Triage LLM call failed: {}", exc)
-        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low"} for p in papers]
+    last_exc: Exception | None = None
+
+    for attempt in range(_retries + 1):
+        try:
+            response = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=[
+                    {"role": "system", "content": _TRIAGE_SYSTEM},
+                    {"role": "user", "content": papers_text},
+                ],
+                max_tokens=1024,
+                response_format={"type": "json_object"},
+            )
+            items = _parse_triage(response.choices[0].message.content or '{"papers":[]}')
+            return [item.model_dump() for item in items]
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Triage parse/validation failed (attempt {}): {}", attempt + 1, exc)
+            last_exc = exc
+        except openai.BadRequestError as exc:
+            # Groq returns 400 when json_object mode produces empty output
+            logger.warning("Triage JSON generation failed (attempt {}): {}", attempt + 1, exc)
+            last_exc = exc
+        except Exception as exc:
+            logger.error("Triage LLM call failed: {}", exc)
+            return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low"} for p in papers]
+
+        if attempt < _retries:
+            await asyncio.sleep(2 ** attempt)  # 1s, 2s backoff
+
+    # All retries exhausted – safe fallback: classify as medium so they still get analyzed
+    logger.warning("Triage exhausted {} retries, falling back to medium", _retries + 1)
+    return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
 
 
 async def _analysis_batch(
