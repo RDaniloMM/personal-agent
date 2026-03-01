@@ -166,18 +166,21 @@ async def _analyze_batch(
 
     except json.JSONDecodeError as exc:
         logger.warning("Failed to parse LLM analysis JSON: {}", exc)
-        # Return minimal analysis for all papers
+        # Mark as low so they don't get written with broken content;
+        # next run will re-try analysis for papers without notes.
         return [
-            {"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium",
-             "summary": "Análisis no disponible", "conclusions": "",
+            {"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
+             "summary": "", "conclusions": "",
              "contributions": "", "key_takeaways": ""}
             for p in papers
         ]
     except Exception as exc:
         logger.error("LLM paper analysis failed: {}", exc)
+        # Return low relevance so these papers are skipped for writing;
+        # they will be re-collected and re-analyzed on the next run.
         return [
-            {"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium",
-             "summary": "Error en análisis", "conclusions": "",
+            {"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
+             "summary": "", "conclusions": "",
              "contributions": "", "key_takeaways": ""}
             for p in papers
         ]

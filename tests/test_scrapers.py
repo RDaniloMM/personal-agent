@@ -54,7 +54,7 @@ class TestObsidianWriter:
         content = Path(path).read_text(encoding="utf-8")
         assert "Test Paper on AI Agents" in content
         assert "2601.12345v1" in content
-        assert "#paper" in content
+        assert "paper" in content  # tag in frontmatter (without #)
 
     def test_write_arxiv_paper_idempotent(self, settings):
         """Writing the same paper twice should not create a duplicate."""
@@ -98,7 +98,7 @@ class TestObsidianWriter:
         content = Path(path).read_text(encoding="utf-8")
         assert "Laptop HP" in content
         assert "S/ 1500" in content
-        assert "#marketplace" in content
+        assert "marketplace" in content  # tag in frontmatter (without #)
 
     def test_write_youtube_summary(self, settings):
         from src.storage.obsidian import write_youtube_summary
@@ -117,7 +117,7 @@ class TestObsidianWriter:
         assert Path(path).exists()
         content = Path(path).read_text(encoding="utf-8")
         assert "AI Agents in 2026" in content
-        assert "#youtube" in content
+        assert "youtube" in content  # tag in frontmatter (without #)
 
     def test_write_idea_note(self, settings):
         from src.storage.obsidian import write_idea_note
@@ -132,7 +132,7 @@ class TestObsidianWriter:
         assert Path(path).exists()
         content = Path(path).read_text(encoding="utf-8")
         assert "evaluación de agentes" in content
-        assert "#idea" in content
+        assert "idea" in content  # tag in frontmatter (without #)
 
 
 class TestFBCrawlerParser:

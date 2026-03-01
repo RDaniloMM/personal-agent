@@ -14,15 +14,30 @@ from src.config import Settings
 
 # ── Frontmatter helper ───────────────────────────────────────────────────────
 
+_YAML_SPECIAL = re.compile(r'[:#\[\]{}>,|&*!%@`\\]')
+
+
+def _yaml_value(value: Any) -> str:
+    """Format a single value for YAML, quoting when necessary."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    s = str(value)
+    if _YAML_SPECIAL.search(s) or s.strip() != s:
+        return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    return s
+
+
 def _frontmatter(fields: dict[str, Any]) -> str:
-    """Build a YAML frontmatter block."""
+    """Build a valid YAML frontmatter block for Obsidian."""
     lines = ["---"]
     for key, value in fields.items():
         if isinstance(value, list):
-            joined = ", ".join(str(v) for v in value)
-            lines.append(f"{key}: [{joined}]")
+            items = ", ".join(_yaml_value(v) for v in value)
+            lines.append(f"{key}: [{items}]")
         else:
-            lines.append(f"{key}: {value}")
+            lines.append(f"{key}: {_yaml_value(value)}")
     lines.append("---")
     return "\n".join(lines)
 
@@ -47,8 +62,12 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
     filepath = folder / filename
 
     if filepath.exists():
-        logger.debug("Paper note already exists: {}", filepath.name)
-        return str(filepath)
+        # Overwrite notes that were written with a failed analysis
+        existing = filepath.read_text(encoding="utf-8")
+        if "Error en análisis" not in existing and "Análisis no disponible" not in existing:
+            logger.debug("Paper note already exists: {}", filepath.name)
+            return str(filepath)
+        logger.info("Overwriting broken paper note: {}", filepath.name)
 
     relevance = paper.get("relevance", "unknown")
     authors = paper.get("authors", [])
@@ -61,7 +80,7 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
             "pdf_url": paper.get("pdf_url", ""),
             "categories": paper.get("categories", []),
             "relevance": relevance,
-            "tags": ["#paper", "#arxiv", "#ai-research", f"#relevance-{relevance}"],
+            "tags": ["paper", "arxiv", "ai-research", f"relevance-{relevance}"],
             "created": datetime.now(UTC).strftime("%Y-%m-%d"),
         }
     )
@@ -124,7 +143,7 @@ def write_marketplace_summary(
             "title": f"FB Marketplace – {date_str}",
             "date": date_str,
             "total_listings": len(listings),
-            "tags": ["#marketplace", "#gadgets", "#daily"],
+            "tags": ["marketplace", "gadgets", "daily"],
         }
     )
 
@@ -165,7 +184,7 @@ def write_youtube_summary(
             "title": f"YouTube Feed – {date_str}",
             "date": date_str,
             "total_videos": len(videos),
-            "tags": ["#youtube", "#feed", "#daily"],
+            "tags": ["youtube", "feed", "daily"],
         }
     )
 
@@ -202,7 +221,7 @@ def write_idea_note(
     filename = _safe_filename(f"{date_str}-{title}") + ".md"
     filepath = folder / filename
 
-    all_tags = ["#idea"] + [f"#{t}" if not t.startswith("#") else t for t in tags]
+    all_tags = ["idea"] + [t.lstrip("#") for t in tags]
 
     fm = _frontmatter(
         {
