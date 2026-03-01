@@ -1,7 +1,8 @@
 """LLM-powered paper analysis: relevance classification & key-point extraction.
 
-Given a batch of Arxiv papers, GPT-5-mini evaluates relevance against the
+Given a batch of Arxiv papers, the LLM evaluates relevance against the
 user's research interests and extracts structured key points for relevant ones.
+Uses Groq API (OpenAI-compatible) for fast inference.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import openai
 from loguru import logger
 
 from src.config import Settings
+from src.prompts.obsidian_skill import OBSIDIAN_FORMATTING_SKILL
 
 # ── Research interests (used to judge relevance) ─────────────────────────────
 
@@ -52,7 +54,13 @@ Each object has:
 - contributions: string (bullet points with \\n)
 - key_takeaways: string (bullet points with \\n)
 
-Write ALL analysis text in Spanish."""
+Write ALL analysis text in Spanish.
+
+{OBSIDIAN_FORMATTING_SKILL}
+
+IMPORTANTE: En los campos de texto (summary, conclusions, contributions, key_takeaways),
+usa formato Obsidian: incluye [[wiki-links]], **negrita** para conceptos clave,
+callouts donde sea relevante, y tags inline como #paper o #ia/agentes."""
 
 # ── Batch size for LLM calls (avoid context overflow) ────────────────────────
 _BATCH_SIZE = 10
@@ -69,7 +77,10 @@ async def analyze_papers(
     if not papers:
         return []
 
-    client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+    client = openai.AsyncOpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+    )
     all_analyses: dict[str, dict[str, Any]] = {}
 
     # Process in batches
@@ -134,7 +145,7 @@ async def _analyze_batch(
                     ),
                 },
             ],
-            max_completion_tokens=8192,
+            max_tokens=8192,
         )
 
         content = response.choices[0].message.content or "[]"

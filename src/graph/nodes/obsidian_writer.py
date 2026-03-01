@@ -1,8 +1,8 @@
 """LangGraph node: write Obsidian notes + LLM-generated key ideas.
 
-Uses *Pragmatic Tool Calling*: GPT-5-mini decides which ideas to extract
+Uses *Pragmatic Tool Calling*: the LLM decides which ideas to extract
 and how to annotate them based on the collected data, rather than
-mechanically writing everything.
+mechanically writing everything.  Uses Groq API for fast inference.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from loguru import logger
 
 from src.config import get_settings
 from src.graph.state import AgentState
+from src.prompts.obsidian_skill import OBSIDIAN_FORMATTING_SKILL
 
 
 # ── LLM tool definitions for pragmatic tool calling ──────────────────────────
@@ -56,7 +57,7 @@ _TOOLS = [
 
 # ── System prompt ────────────────────────────────────────────────────────────
 
-_SYSTEM = """You are a research analyst assistant. You've just received today's
+_SYSTEM = f"""You are a research analyst assistant. You've just received today's
 data collection from three sources: Facebook Marketplace listings (gadgets,
 electronics, books), YouTube videos, and Arxiv AI research papers.
 
@@ -69,8 +70,15 @@ Your task:
 4. Call the `write_idea_note` tool for each insight worth recording.
 5. If nothing is noteworthy, call the tool once with a brief "nothing notable today" note.
 
-Write notes in Spanish. Use Obsidian [[wiki-links]] to reference related concepts.
-Be concise but insightful."""
+Write notes in Spanish. Be concise but insightful.
+
+{OBSIDIAN_FORMATTING_SKILL}
+
+IMPORTANTE: En el contenido de cada nota, usa formato Obsidian completo:
+- Incluye [[wiki-links]] para conceptos, autores y frameworks
+- Usa callouts (> [!tip], > [!note]) para resaltar hallazgos
+- Usa **negrita** y ==resaltado== para info clave
+- Añade tags inline relevantes (#ia/agentes, #tendencia, etc.)"""
 
 
 async def write_obsidian_node(state: AgentState) -> dict:
@@ -151,10 +159,13 @@ async def write_obsidian_node(state: AgentState) -> dict:
 async def _extract_ideas_with_llm(
     state: AgentState, settings: "Settings"
 ) -> list[dict[str, Any]]:
-    """Use GPT-5-mini with tool calling to extract key ideas from today's data."""
+    """Use LLM with tool calling to extract key ideas from today's data."""
     import openai
 
-    client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+    client = openai.AsyncOpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+    )
 
     # Build a concise data summary for the LLM
     data_summary = _build_data_summary(state)
@@ -174,7 +185,7 @@ async def _extract_ideas_with_llm(
         ],
         tools=_TOOLS,
         tool_choice="auto",
-        max_completion_tokens=4096,
+        max_tokens=4096,
     )
 
     # Parse tool calls from the response

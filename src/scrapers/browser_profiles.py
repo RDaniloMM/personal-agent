@@ -23,6 +23,14 @@ async def create_profile_interactive(profile_name: str, settings: Settings) -> P
 
     profiler = BrowserProfiler()
     profile_path = await profiler.create_profile(profile_name=profile_name)
+
+    if profile_path is None:
+        raise RuntimeError(
+            f"No se pudo crear el perfil '{profile_name}'. "
+            "Asegúrate de que Playwright Chromium esté instalado: "
+            "uv run playwright install chromium"
+        )
+
     logger.info("Profile '{}' saved at {}", profile_name, profile_path)
     return Path(profile_path)
 

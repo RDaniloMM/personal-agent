@@ -13,19 +13,19 @@ START
                        │
                  index_vectors (pgvector)
                        │
-                write_obsidian (GPT-5-mini)
+                write_obsidian (LLM Groq)
                        │
                       END
 ```
 
-**Stack:** LangGraph · Crawl4AI · Playwright · arxiv.py · PostgreSQL + pgvector · OpenAI GPT-5-mini · APScheduler · Docker
+**Stack:** LangGraph · Crawl4AI · Playwright · arxiv.py · PostgreSQL + pgvector · Groq (Llama 3.3) · APScheduler · Docker
 
 ## Requisitos
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (gestor de paquetes)
 - Docker & Docker Compose (para deploy en servidor)
-- API key de OpenAI
+- API key de Groq (LLM) y OpenAI (embeddings)
 - Vault de Obsidian accesible por filesystem
 
 ## Instalación
@@ -42,7 +42,7 @@ uv run playwright install chromium --with-deps
 
 # 4. Configurar variables de entorno
 cp .env.example .env
-# Editar .env con tu OPENAI_API_KEY y rutas
+# Editar .env con tus API keys (LLM_API_KEY, EMBEDDING_API_KEY) y rutas
 ```
 
 ## Configuración de perfiles de navegador
@@ -93,10 +93,10 @@ docker compose logs -f
 
 ### Horarios por defecto
 
-| Tarea                    | Frecuencia           | Configurable en        |
-| ------------------------ | -------------------- | ---------------------- |
-| FB Marketplace + YouTube | 2x/día (8:00, 20:00) | `SCRAPE_HOURS`         |
-| Arxiv papers             | Cada 4 horas         | `ARXIV_INTERVAL_HOURS` |
+| Tarea                    | Frecuencia           | Configurable en |
+| ------------------------ | -------------------- | --------------- |
+| FB Marketplace + YouTube | 2x/día (8:00, 20:00) | `SCRAPE_HOURS`  |
+| Arxiv papers             | 1x/día (07:00)       | `ARXIV_HOUR`    |
 
 ## Estructura del vault de Obsidian
 
@@ -108,7 +108,7 @@ Segundo cerebro/
     ├── Papers/          # Un .md por paper de Arxiv
     ├── FB-Marketplace/  # Resúmenes diarios de listings
     ├── YouTube/         # Resúmenes diarios de videos
-    └── Ideas/           # Ideas clave generadas por GPT-5-mini
+    └── Ideas/           # Ideas clave generadas por el LLM
 ```
 
 Cada nota incluye frontmatter YAML con tags para fácil búsqueda en Obsidian.

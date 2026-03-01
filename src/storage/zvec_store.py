@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-import openai
 import psycopg
 from loguru import logger
 from pgvector.psycopg import register_vector
@@ -14,6 +13,23 @@ from src.config import Settings
 
 # ── Table names per collection ───────────────────────────────────────────────
 _COLLECTIONS = {"fb_marketplace", "youtube_feed", "arxiv_papers"}
+
+# Lazy-loaded sentence-transformers model (singleton)
+_MODEL = None
+
+
+def _get_model():
+    """Load the sentence-transformers model once and cache it."""
+    global _MODEL  # noqa: PLW0603
+    if _MODEL is None:
+        from sentence_transformers import SentenceTransformer
+
+        _MODEL = SentenceTransformer(
+            "sentence-transformers/all-MiniLM-L6-v2",
+            device="cpu",
+        )
+        logger.info("Loaded embedding model: all-MiniLM-L6-v2 (dim=384)")
+    return _MODEL
 
 
 def _ensure_schema(conn: psycopg.Connection, dim: int) -> None:
@@ -48,20 +64,10 @@ def _get_connection(settings: Settings) -> psycopg.Connection:
 
 
 def embed_texts(texts: list[str], settings: Settings) -> list[list[float]]:
-    """Generate embeddings using OpenAI's embedding model."""
-    client = openai.OpenAI(api_key=settings.openai_api_key)
-    all_embeddings: list[list[float]] = []
-    batch_size = 512
-
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        response = client.embeddings.create(
-            model=settings.embedding_model,
-            input=batch,
-        )
-        all_embeddings.extend([d.embedding for d in response.data])
-
-    return all_embeddings
+    """Generate embeddings using a local sentence-transformers model."""
+    model = _get_model()
+    embeddings = model.encode(texts, show_progress_bar=False, batch_size=256)
+    return embeddings.tolist()
 
 
 # ── CRUD operations ──────────────────────────────────────────────────────────

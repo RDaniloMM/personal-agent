@@ -17,15 +17,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── LLM ──────────────────────────────────────────
-    openai_api_key: str = Field(..., description="OpenAI API key")
-    llm_model: str = Field("gpt-5-mini", description="Chat model to use")
-
-    # ── Embeddings ───────────────────────────────────
-    embedding_model: str = Field(
-        "text-embedding-3-small", description="OpenAI embedding model"
+    # ── LLM (Groq / OpenAI-compatible) ─────────────────
+    llm_api_key: str = Field(..., description="API key for the LLM provider (Groq)")
+    llm_base_url: str = Field(
+        "https://api.groq.com/openai/v1",
+        description="Base URL for the LLM API (OpenAI-compatible)",
     )
-    embedding_dim: int = Field(1536, description="Embedding dimension")
+    llm_model: str = Field("gpt-oss-120b", description="Chat model to use")
+
+    # ── Embeddings (local sentence-transformers) ────
+    embedding_dim: int = Field(384, description="Embedding dimension (all-MiniLM-L6-v2)")
 
     # ── PostgreSQL + pgvector ────────────────────────
     database_url: str = Field(

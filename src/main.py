@@ -126,17 +126,22 @@ def main() -> None:
         replace_existing=True,
     )
 
-    scheduler.start()
-    logger.info("Scheduler started. Press Ctrl+C to stop.")
+    # Run the scheduler inside an asyncio event loop
+    async def _run_scheduler() -> None:
+        scheduler.start()
+        logger.info("Scheduler started. Press Ctrl+C to stop.")
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            scheduler.shutdown(wait=False)
 
-    # Keep the event loop running
-    loop = asyncio.new_event_loop()
     try:
-        loop.run_forever()
+        asyncio.run(_run_scheduler())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down scheduler …")
-        scheduler.shutdown(wait=False)
-        loop.close()
 
 
 if __name__ == "__main__":

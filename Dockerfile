@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim AS base
 
 # Install uv
@@ -24,11 +25,13 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-# Install Python dependencies with uv
-RUN uv sync --no-dev
+# Install Python dependencies with uv (cached between builds)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev
 
-# Install Playwright browsers
-RUN uv run playwright install chromium --with-deps
+# Install Playwright browsers (cached between builds)
+RUN --mount=type=cache,target=/root/.cache/ms-playwright \
+    uv run playwright install chromium --with-deps
 
 # Copy tests
 COPY tests/ ./tests/

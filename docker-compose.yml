@@ -44,6 +44,9 @@ services:
       # For production, mount your OneDrive/vault here
       - ./vault:/app/vault
 
+      # UV cache – persists downloaded packages between container recreations
+      - uv-cache:/root/.cache/uv
+
     # Default: scheduler daemon
     command: ["uv", "run", "python", "-m", "src.main"]
 
@@ -65,3 +68,4 @@ services:
 
 volumes:
   pgdata:
+  uv-cache:
