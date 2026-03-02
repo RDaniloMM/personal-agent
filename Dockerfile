@@ -29,9 +29,8 @@ COPY src/ ./src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev
 
-# Install Playwright browsers (cached between builds)
-RUN --mount=type=cache,target=/root/.cache/ms-playwright \
-    uv run playwright install chromium --with-deps
+# Install Playwright browsers (persisted in image, not in cache mount)
+RUN uv run playwright install chromium --with-deps
 
 # Copy tests
 COPY tests/ ./tests/

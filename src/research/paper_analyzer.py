@@ -52,9 +52,12 @@ class AnalysisResponse(BaseModel):
 
 RESEARCH_INTERESTS = """\
 - AI agents / agentic systems / autonomous architectures
-- LLM evaluation, benchmarks, agent evaluation
+- LLM evaluation, benchmarks, agent evaluation frameworks
 - Function/tool calling in LLMs
-- Multi-agent systems"""
+- Multi-agent systems
+- RAG + Reasoning and Evaluation frameworks
+- AI agents in industry/production environments
+"""
 
 # ── Phase 1: quick relevance triage (cheap – small output) ────────────────────
 

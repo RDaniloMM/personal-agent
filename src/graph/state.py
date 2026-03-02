@@ -26,14 +26,18 @@ class MarketplaceListing:
 
 @dataclass
 class YouTubeVideo:
-    """A single YouTube video entry."""
+    """A single YouTube video entry with rich metadata."""
 
     title: str
     channel: str
     url: str
+    video_id: str = ""
     views: str = ""
     duration: str = ""
+    upload_date: str = ""
     description: str = ""
+    tags: list[str] = field(default_factory=list)
+    subtitles: str = ""  # truncated transcript text
     thumbnail_url: str = ""
     scraped_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     source: str = "youtube"

@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from src.config import get_settings
+from src.config import get_settings, Settings
 from src.graph.state import AgentState
 from src.prompts.obsidian_skill import OBSIDIAN_FORMATTING_SKILL
 
@@ -157,7 +157,7 @@ async def write_obsidian_node(state: AgentState) -> dict:
 
 
 async def _extract_ideas_with_llm(
-    state: AgentState, settings: "Settings"
+    state: AgentState, settings: Settings
 ) -> list[dict[str, Any]]:
     """Use LLM with tool calling to extract key ideas from today's data."""
     import openai
@@ -228,8 +228,12 @@ def _build_data_summary(state: AgentState) -> str:
 
     if state.youtube_videos:
         videos_text = "\n".join(
-            f"- {v.get('title', '')} ({v.get('channel', '')})"
-            for v in state.youtube_videos[:15]
+            f"- **{v.get('title', '')}** ({v.get('channel', '')})"
+            f" [{v.get('duration', '')}] {v.get('upload_date', '')}"
+            f"\n  Tags: {', '.join(v.get('tags', [])[:5])}"
+            f"\n  {(v.get('description', '') or '')[:150]}"
+            f"\n  Transcript: {(v.get('subtitles', '') or '')[:200]}…"
+            for v in state.youtube_videos[:10]
         )
         sections.append(f"## YouTube ({len(state.youtube_videos)} videos)\n{videos_text}")
 

@@ -163,21 +163,59 @@ Moquegua
 
 
 class TestYTCrawlerParser:
-    """Test the YouTube parser (no network calls)."""
+    """Test the YouTube URL extraction and helpers (no network calls)."""
 
-    def test_parse_videos_extracts_items(self):
-        from src.scrapers.yt_crawler import _parse_videos
+    def test_extract_video_urls(self):
+        from src.scrapers.yt_crawler import _extract_video_urls
 
-        markdown = """
-## Building AI Agents with LangGraph
-TechChannel · 120K views · 2 days ago
-Learn how to build autonomous agents using LangGraph
+        html = """
+        <a href="/watch?v=abc12345678">Video 1</a>
+        <a href="/watch?v=xyz98765432">Video 2</a>
+        <a href="/watch?v=abc12345678">Duplicate</a>
+        <a href="/shorts/not-a-watch">Short</a>
+        """
+        urls = _extract_video_urls(html)
+        assert len(urls) == 2
+        assert "https://www.youtube.com/watch?v=abc12345678" in urls
+        assert "https://www.youtube.com/watch?v=xyz98765432" in urls
 
-## LLM Evaluation Deep Dive
-ResearchLab · 45K views · 1 week ago
-A comprehensive overview of LLM benchmarks
+    def test_format_duration(self):
+        from src.scrapers.yt_crawler import _format_duration
+
+        assert _format_duration(0) == ""
+        assert _format_duration(None) == ""
+        assert _format_duration(65) == "1:05"
+        assert _format_duration(3661) == "1:01:01"
+
+    def test_format_date(self):
+        from src.scrapers.yt_crawler import _format_date
+
+        assert _format_date("20260301") == "2026-03-01"
+        assert _format_date("invalid") == "invalid"
+        assert _format_date("") == ""
+
+    def test_parse_vtt(self):
+        import tempfile
+        import os
+        from src.scrapers.yt_crawler import _parse_vtt
+
+        vtt_content = """WEBVTT
+Kind: captions
+Language: en
+
+00:00:00.000 --> 00:00:02.000
+Hello world
+
+00:00:02.000 --> 00:00:04.000
+This is a test
+
+00:00:04.000 --> 00:00:06.000
+Hello world
 """
-        videos = _parse_videos(markdown, "https://youtube.com")
-        assert len(videos) >= 2
-        assert videos[0]["title"] == "Building AI Agents with LangGraph"
-        assert videos[0]["channel"] == "TechChannel"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".vtt", delete=False, encoding="utf-8") as f:
+            f.write(vtt_content)
+            f.flush()
+            result = _parse_vtt(f.name)
+        os.unlink(f.name)
+        assert "Hello world" in result
+        assert "This is a test" in result

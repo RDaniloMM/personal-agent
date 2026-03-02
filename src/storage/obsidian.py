@@ -165,7 +165,7 @@ Se encontraron **{len(listings)}** listings.
 def write_youtube_summary(
     videos: list[dict[str, Any]], settings: Settings
 ) -> str:
-    """Write a daily summary of scraped YouTube videos."""
+    """Write a daily summary of scraped YouTube videos with rich metadata."""
     folder = settings.obsidian_subfolder("YouTube")
     date_str = datetime.now(UTC).strftime("%Y-%m-%d")
     filename = f"youtube-{date_str}.md"
@@ -182,18 +182,39 @@ def write_youtube_summary(
 
     items_md = ""
     for v in videos[:40]:
-        items_md += f"""
-### {v.get('title', 'Sin título')}
-- **Canal:** {v.get('channel', 'N/A')}
-- **Views:** {v.get('views', 'N/A')}
-- **Link:** {v.get('url', '')}
-- {v.get('description', '')[:200]}
+        title = v.get('title', 'Sin título')
+        channel = v.get('channel', 'N/A')
+        url = v.get('url', '')
+        views = v.get('views', '')
+        duration = v.get('duration', '')
+        upload_date = v.get('upload_date', '')
+        description = (v.get('description', '') or '')[:400]
+        tags = v.get('tags', [])
+        subtitles = (v.get('subtitles', '') or '')[:500]
 
-"""
+        tags_str = ", ".join(tags[:8]) if tags else "N/A"
+
+        items_md += f"### {title}\n"
+        items_md += f"- **Canal:** {channel}\n"
+        if url:
+            items_md += f"- **Link:** {url}\n"
+        if upload_date:
+            items_md += f"- **Fecha:** {upload_date}\n"
+        if duration:
+            items_md += f"- **Duración:** {duration}\n"
+        if views:
+            items_md += f"- **Views:** {views}\n"
+        if tags_str != "N/A":
+            items_md += f"- **Tags:** {tags_str}\n"
+        if description:
+            items_md += f"\n> [!info] Descripción\n> {description}\n"
+        if subtitles:
+            items_md += f"\n> [!quote] Transcripción (extracto)\n> {subtitles}\n"
+        items_md += "\n---\n\n"
 
     body = f"""{fm}
 
-# YouTube Feed – {date_str}
+## YouTube Feed – {date_str}
 
 Se encontraron **{len(videos)}** videos relevantes.
 

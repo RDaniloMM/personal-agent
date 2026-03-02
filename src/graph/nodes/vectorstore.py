@@ -59,7 +59,13 @@ async def index_vectors_node(state: AgentState) -> dict:
             logger.info("Indexed {} FB listings", count)
 
         if new_yt:
-            count = upsert_documents("youtube_feed", new_yt, "title", settings)
+            # Embed with rich content: title + description + subtitles
+            for v in new_yt:
+                v["_embed_text"] = (
+                    f"{v.get('title', '')}. {v.get('description', '')[:300]} "
+                    f"{v.get('subtitles', '')[:500]}"
+                )
+            count = upsert_documents("youtube_feed", new_yt, "_embed_text", settings)
             total_indexed += count
             logger.info("Indexed {} YouTube videos", count)
 

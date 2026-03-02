@@ -45,6 +45,7 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
     """Scrape FB Marketplace for configured queries and locations.
 
     Uses a persistent browser profile so Facebook sees an authenticated session.
+    Falls back gracefully when selectors change or the session has expired.
     """
     from crawl4ai import (
         AsyncWebCrawler,
@@ -53,17 +54,34 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
         CrawlerRunConfig,
     )
 
+    profile_path = settings.fb_profile_path
+    if not profile_path.exists() or not any(profile_path.iterdir()):
+        logger.warning(
+            "FB profile not found at {}. "
+            "Create it on your desktop with: uv run python -m src.scrapers.browser_profiles fb",
+            profile_path,
+        )
+        return []
+
     browser_config = BrowserConfig(
         headless=True,
         use_managed_browser=True,
-        user_data_dir=str(settings.fb_profile_path),
+        user_data_dir=str(profile_path),
         browser_type="chromium",
     )
 
+    # Multiple fallback selectors — Facebook changes these frequently
+    wait_selectors = [
+        "css:div[aria-label='Collection of Marketplace items']",
+        "css:div[role='main'] a[href*='/marketplace/item/']",
+        "css:div[data-pagelet*='Marketplace']",
+        "css:div[role='main']",
+    ]
+
     crawl_config = CrawlerRunConfig(
         js_code=SCROLL_JS,
-        wait_for="css:div[aria-label='Collection of Marketplace items']",
-        page_timeout=60000,
+        wait_for=wait_selectors[0],
+        page_timeout=30000,
         magic=True,
         remove_overlay_elements=True,
         cache_mode=CacheMode.BYPASS,
@@ -81,32 +99,39 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
                 )
                 logger.info("Crawling FB Marketplace: {} in {}", query, location)
 
-                try:
-                    result = await crawler.arun(url=url, config=crawl_config)
-
-                    if not result.success:
-                        logger.warning(
-                            "FB crawl failed for {}/{}: {}",
-                            location,
-                            query,
-                            result.error_message,
-                        )
+                result = None
+                # Try each selector until one works
+                for selector in wait_selectors:
+                    crawl_config.wait_for = selector
+                    try:
+                        result = await crawler.arun(url=url, config=crawl_config)
+                        if result.success and result.markdown and len(result.markdown.strip()) > 100:
+                            break
+                    except Exception:
                         continue
 
-                    listings = _parse_listings(result.markdown, query, location)
-                    all_listings.extend(listings)
-                    logger.info(
-                        "Found {} listings for '{}' in {}",
-                        len(listings),
-                        query,
-                        location,
-                    )
+                if result is None or not result.success:
+                    msg = result.error_message if result else "all selectors failed"
+                    # Check for login wall
+                    if result and result.markdown and "log in" in result.markdown.lower():
+                        logger.warning(
+                            "FB session expired for {}/{}. Re-create profile with: "
+                            "uv run python -m src.scrapers.browser_profiles fb",
+                            location, query,
+                        )
+                    else:
+                        logger.warning("FB crawl failed for {}/{}: {}", location, query, msg)
+                    continue
 
-                    # Rate-limit between requests
-                    await asyncio.sleep(5)
+                listings = _parse_listings(result.markdown, query, location)
+                all_listings.extend(listings)
+                logger.info(
+                    "Found {} listings for '{}' in {}",
+                    len(listings), query, location,
+                )
 
-                except Exception as exc:
-                    logger.error("Error crawling FB {}/{}: {}", location, query, exc)
+                # Rate-limit between requests
+                await asyncio.sleep(5)
 
     logger.info("Total FB Marketplace listings scraped: {}", len(all_listings))
     return all_listings
