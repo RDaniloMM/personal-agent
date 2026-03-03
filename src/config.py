@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     def google_profile_path(self) -> Path:
         return self.browser_profiles_dir / self.google_profile_name
 
+    @property
+    def cookies_path(self) -> Path:
+        return self.browser_profiles_dir / "cookies.txt"
+
     def obsidian_subfolder(self, *parts: str) -> Path:
         path = self.obsidian_vault_path / "Agent-Research" / Path(*parts)
         path.mkdir(parents=True, exist_ok=True)
