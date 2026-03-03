@@ -1,10 +1,10 @@
-"""YouTube crawler: yt-dlp search + yt-dlp cookie-based feeds + yt-dlp enrichment.
+"""YouTube crawler: yt-dlp search + YouTube Data API feeds + yt-dlp enrichment.
 
 Strategy:
     1. yt-dlp ``ytsearch`` → discover videos for each research interest
        (fast, no browser needed).
-    2. yt-dlp + cookies.txt → fetch personalised feeds (home,
-       subscriptions) using exported browser cookies — no Playwright needed.
+    2. YouTube Data API v3 (OAuth2) → fetch latest uploads from
+       subscribed channels for personalised discovery.
     3. yt-dlp → for each discovered video, extract rich metadata: title,
        description, tags, upload date, duration, view count.
     4. yt-dlp → download auto-generated subtitles (es/en) so the LLM can
@@ -63,19 +63,18 @@ async def crawl_youtube(settings: Settings) -> list[dict[str, Any]]:
     search_urls = await _discover_via_search()
     all_urls.extend(search_urls)
 
-    # Phase 1b: personalised feeds via yt-dlp + cookies
-    cookies_file = settings.cookies_path
-    if cookies_file.exists():
-        logger.info("cookies.txt found — fetching personalised feeds via yt-dlp")
-        feed_urls = await _discover_from_feeds(cookies_file)
-        all_urls.extend(feed_urls)
+    # Phase 1b: personalised feeds via YouTube Data API (OAuth2)
+    token_path = settings.youtube_token_path
+    if token_path.exists():
+        logger.info("YouTube OAuth token found — fetching subscription feeds")
+        api_urls = await _discover_from_api(token_path, settings.youtube_client_secret_path)
+        all_urls.extend(api_urls)
     else:
         logger.warning(
-            "cookies.txt not found at {}. "
+            "YouTube OAuth token not found at {}. "
             "Personalised feeds unavailable. "
-            "Export cookies from Chrome and place at {}",
-            cookies_file,
-            cookies_file,
+            "Run: uv run python -m src.scrapers.youtube_auth",
+            token_path,
         )
 
     # Deduplicate, preserve order
@@ -88,8 +87,7 @@ async def crawl_youtube(settings: Settings) -> list[dict[str, Any]]:
     logger.info("Discovered {} unique video URLs", len(video_urls))
 
     # Phase 2: enrich with yt-dlp (metadata + subtitles)
-    cookies_arg = str(cookies_file) if cookies_file.exists() else None
-    videos = await _enrich_videos(video_urls[:_MAX_VIDEOS_TO_ENRICH], cookies_arg)
+    videos = await _enrich_videos(video_urls[:_MAX_VIDEOS_TO_ENRICH])
 
     logger.info(
         "Enriched {}/{} videos with metadata + subtitles",
@@ -163,66 +161,73 @@ async def _discover_via_search() -> list[str]:
     return urls
 
 
-# ── Phase 1b: Personalised feed discovery via yt-dlp + cookies ───────────────
+# ── Phase 1b: Personalised feed discovery via YouTube Data API ───────────
 
-_FEED_PLAYLIST_URLS = [
-    # yt-dlp can extract the YouTube home feed and subscriptions as playlists
-    ":ythome",                               # Home / recommendations
-    ":ytsubs",                               # Subscriptions feed
-    "https://www.youtube.com/feed/trending",  # Trending (fallback, no auth needed)
-]
+# Max recent videos to pull per subscribed channel
+_VIDEOS_PER_CHANNEL = 3
+# Max subscriptions to scan (API quota: 1 unit per sub page)
+_MAX_SUBSCRIPTIONS = 50
 
 
-async def _discover_from_feeds(cookies_file: Path) -> list[str]:
-    """Use yt-dlp with cookies.txt to fetch personalised feed URLs."""
+async def _discover_from_api(token_path: Path, client_secret_path: Path) -> list[str]:
+    """Use YouTube Data API v3 to list subscriptions and fetch recent uploads."""
     urls: list[str] = []
 
-    for feed in _FEED_PLAYLIST_URLS:
-        try:
-            cmd = [
-                "yt-dlp",
-                "--flat-playlist",
-                "--dump-json",
-                "--no-warnings",
-                "--cookies", str(cookies_file),
-                "--playlist-end", "15",  # limit to 15 per feed
-                feed,
-            ]
+    try:
+        from src.scrapers.youtube_auth import build_youtube_service
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=45,
-            )
+        youtube = build_youtube_service(token_path, client_secret_path)
 
-            if proc.returncode != 0:
-                err = stderr.decode(errors="replace").strip()
-                logger.warning("yt-dlp feed '{}' failed: {}", feed, err[:200])
-                continue
+        # Step 1: get subscribed channel IDs
+        channel_ids: list[str] = []
+        request = youtube.subscriptions().list(
+            part="snippet",
+            mine=True,
+            maxResults=50,
+            order="relevance",
+        )
+        while request and len(channel_ids) < _MAX_SUBSCRIPTIONS:
+            response = request.execute()
+            for item in response.get("items", []):
+                ch_id = item["snippet"]["resourceId"]["channelId"]
+                channel_ids.append(ch_id)
+            request = youtube.subscriptions().list_next(request, response)
 
-            count = 0
-            for line in stdout.decode(errors="replace").splitlines():
-                line = line.strip()
-                if not line:
+        logger.info("YouTube API: found {} subscriptions", len(channel_ids))
+
+        # Step 2: get recent videos from each channel
+        # Use search.list (costs 100 units per call) — batch channels
+        # to stay under quota.  Alternative: channels.list → uploads
+        # playlist → playlistItems.list (3 units per channel, cheaper).
+        for ch_id in channel_ids:
+            try:
+                # Get uploads playlist ID (costs 1 unit)
+                ch_resp = youtube.channels().list(
+                    part="contentDetails",
+                    id=ch_id,
+                ).execute()
+                items = ch_resp.get("items", [])
+                if not items:
                     continue
-                try:
-                    data = json.loads(line)
-                    vid_id = data.get("id", "")
-                    if vid_id and len(vid_id) == 11:
+                uploads_id = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+                # Get latest videos from uploads playlist (costs 1 unit)
+                pl_resp = youtube.playlistItems().list(
+                    part="snippet",
+                    playlistId=uploads_id,
+                    maxResults=_VIDEOS_PER_CHANNEL,
+                ).execute()
+                for vid in pl_resp.get("items", []):
+                    vid_id = vid["snippet"]["resourceId"].get("videoId", "")
+                    if vid_id:
                         urls.append(f"https://www.youtube.com/watch?v={vid_id}")
-                        count += 1
-                except json.JSONDecodeError:
-                    continue
+            except Exception as exc:
+                logger.debug("API error for channel {}: {}", ch_id, exc)
 
-            logger.info("yt-dlp feed '{}': found {} videos", feed, count)
+        logger.info("YouTube API: discovered {} videos from subscriptions", len(urls))
 
-        except asyncio.TimeoutError:
-            logger.warning("yt-dlp feed '{}' timed out", feed)
-        except Exception as exc:
-            logger.error("yt-dlp feed '{}' error: {}", feed, exc)
+    except Exception as exc:
+        logger.error("YouTube Data API discovery failed: {}", exc)
 
     return urls
 
@@ -256,13 +261,13 @@ def _extract_video_urls(html_or_md: str) -> list[str]:
 # ── Phase 2: yt-dlp metadata + subtitles ────────────────────────────────────
 
 
-async def _enrich_videos(urls: list[str], cookies: str | None = None) -> list[dict[str, Any]]:
+async def _enrich_videos(urls: list[str]) -> list[dict[str, Any]]:
     """Use yt-dlp to extract metadata and subtitles for each video."""
     videos: list[dict[str, Any]] = []
 
     for i, url in enumerate(urls):
         try:
-            info = await _ytdlp_extract(url, cookies)
+            info = await _ytdlp_extract(url)
             if info:
                 videos.append(info)
                 logger.debug("Enriched ({}/{}): {}", i + 1, len(urls), info.get("title", "")[:60])
@@ -275,7 +280,7 @@ async def _enrich_videos(urls: list[str], cookies: str | None = None) -> list[di
     return videos
 
 
-async def _ytdlp_extract(url: str, cookies: str | None = None) -> dict[str, Any] | None:
+async def _ytdlp_extract(url: str) -> dict[str, Any] | None:
     """Run yt-dlp to extract metadata, then fetch subtitles separately."""
     # Step 1: metadata
     cmd = [
@@ -284,10 +289,8 @@ async def _ytdlp_extract(url: str, cookies: str | None = None) -> dict[str, Any]
         "--dump-json",
         "--no-warnings",
         "--no-playlist",
+        url,
     ]
-    if cookies:
-        cmd.extend(["--cookies", cookies])
-    cmd.append(url)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -310,7 +313,7 @@ async def _ytdlp_extract(url: str, cookies: str | None = None) -> dict[str, Any]
         return None
 
     # Step 2: subtitles
-    subtitles = await _fetch_subtitles(url, cookies)
+    subtitles = await _fetch_subtitles(url)
 
     video = YouTubeVideo(
         title=data.get("title", ""),
@@ -329,7 +332,7 @@ async def _ytdlp_extract(url: str, cookies: str | None = None) -> dict[str, Any]
     return asdict(video)
 
 
-async def _fetch_subtitles(url: str, cookies: str | None = None) -> str:
+async def _fetch_subtitles(url: str) -> str:
     """Download subtitles via yt-dlp and extract plain text."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cmd = [
@@ -342,10 +345,8 @@ async def _fetch_subtitles(url: str, cookies: str | None = None) -> str:
             "--sub-lang", "es,en",
             "--sub-format", "vtt",
             "--output", os.path.join(tmpdir, "%(id)s.%(ext)s"),
+            url,
         ]
-        if cookies:
-            cmd.extend(["--cookies", cookies])
-        cmd.append(url)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,

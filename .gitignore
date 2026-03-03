@@ -36,6 +36,11 @@ logs/
 # ONNX model cache
 .models/
 
+# OAuth2 credentials (NEVER commit)
+client_secret.json
+token.json
+cookies.json
+
 # Distribution
 dist/
 build/

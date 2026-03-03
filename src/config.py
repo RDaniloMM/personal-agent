@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     def cookies_path(self) -> Path:
         return self.browser_profiles_dir / "cookies.txt"
 
+    @property
+    def youtube_token_path(self) -> Path:
+        return self.browser_profiles_dir / "youtube_token.json"
+
+    @property
+    def youtube_client_secret_path(self) -> Path:
+        return self.browser_profiles_dir / "client_secret.json"
+
     def obsidian_subfolder(self, *parts: str) -> Path:
         path = self.obsidian_vault_path / "Agent-Research" / Path(*parts)
         path.mkdir(parents=True, exist_ok=True)

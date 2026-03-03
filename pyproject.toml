@@ -33,6 +33,10 @@ dependencies = [
     # YouTube metadata & subtitles
     "yt-dlp>=2024.0",
 
+    # YouTube Data API (OAuth2 for personalised feeds)
+    "google-api-python-client>=2.100,<3.0",
+    "google-auth-oauthlib>=1.2,<2.0",
+
     # Research
     "arxiv>=2.1,<3.0",
 
