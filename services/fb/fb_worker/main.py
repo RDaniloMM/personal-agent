@@ -58,6 +58,11 @@ async def run_pipeline() -> None:
     deals = await analyze_deals(all_listings, settings)
     logger.info("Deal analyzer: {}/{} are deals", len(deals), len(all_listings))
 
+    # 2b. Enrich deals with seller descriptions
+    if deals:
+        from fb_worker.crawler import enrich_with_descriptions
+        deals = await enrich_with_descriptions(deals, max_items=20)
+
     # 3. Index in pgvector (deduplicated)
     from shared.storage.zvec_store import get_existing_ids, upsert_documents
 

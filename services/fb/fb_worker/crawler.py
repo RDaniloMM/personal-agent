@@ -192,6 +192,147 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
     return all_listings
 
 
+# ── JS for item detail page ─────────────────────────────────────────────────
+
+DISMISS_ITEM_JS = """
+(async () => {
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+    const dismiss = () => {
+        document.querySelectorAll(
+            '[aria-label="Close"], [aria-label="Cerrar"]'
+        ).forEach(b => { try { b.click(); } catch(e){} });
+        document.querySelectorAll('[role="dialog"]').forEach(el => el.remove());
+        document.body.style.overflow = 'auto';
+        document.documentElement.style.overflow = 'auto';
+        document.body.style.position = 'static';
+    };
+    dismiss();
+    await delay(2000);
+    dismiss();
+    window.scrollBy(0, 400);
+    await delay(1000);
+})();
+"""
+
+
+async def enrich_with_descriptions(
+    listings: list[dict[str, Any]], *, max_items: int = 20
+) -> list[dict[str, Any]]:
+    """Visit each listing's URL to scrape the seller's description.
+
+    Only processes up to max_items to avoid excessive scraping.
+    """
+    from crawl4ai import (
+        AsyncWebCrawler,
+        BrowserConfig,
+        CacheMode,
+        CrawlerRunConfig,
+    )
+
+    urls = [l for l in listings if l.get("url") and not l.get("description")]
+    if not urls:
+        return listings
+
+    urls = urls[:max_items]
+    logger.info("Enriching {} listings with descriptions…", len(urls))
+
+    browser_config = BrowserConfig(
+        headless=True,
+        use_managed_browser=True,
+        browser_type="chromium",
+        extra_args=[
+            "--disable-blink-features=AutomationControlled",
+            "--lang=es-PE",
+        ],
+        headers={"Accept-Language": "es-PE,es;q=0.9,en;q=0.5"},
+    )
+
+    crawl_config = CrawlerRunConfig(
+        js_code=DISMISS_ITEM_JS,
+        wait_for='css:div[role="main"]',
+        page_timeout=30000,
+        magic=True,
+        remove_overlay_elements=True,
+        cache_mode=CacheMode.BYPASS,
+    )
+
+    enriched_count = 0
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        for listing in urls:
+            try:
+                result = await crawler.arun(url=listing["url"], config=crawl_config)
+                if not result.success or not result.markdown:
+                    continue
+
+                desc = _extract_description(result.markdown)
+                if desc:
+                    listing["description"] = desc
+                    enriched_count += 1
+                    logger.debug(
+                        "Description for '{}': {}…",
+                        listing.get("title", "")[:40],
+                        desc[:80],
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to get description for {}: {}",
+                    listing.get("url", ""), exc,
+                )
+            await asyncio.sleep(3)
+
+    logger.info("Enriched {}/{} listings with descriptions", enriched_count, len(urls))
+    return listings
+
+
+def _extract_description(markdown: str) -> str:
+    """Extract the seller's item description from a FB item page markdown."""
+    lines = markdown.splitlines()
+    desc_lines: list[str] = []
+    capture = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip navigation / boilerplate
+        if any(kw in stripped.lower() for kw in (
+            "log in", "create new account", "email or phone",
+            "forgot password", "see more on facebook",
+            "loading more", "marketplace",
+        )):
+            continue
+
+        # Start capturing after "Seller's description" / "Descripción del vendedor"
+        if re.search(r"(?:seller.s description|descripci[oó]n del vendedor)", stripped, re.I):
+            capture = True
+            continue
+
+        if capture:
+            # Stop at next section header or empty zone
+            if stripped.startswith("#") or stripped.startswith("---"):
+                break
+            if not stripped:
+                if desc_lines:
+                    break
+                continue
+            desc_lines.append(stripped)
+
+    if desc_lines:
+        return " ".join(desc_lines)[:500]
+
+    # Fallback: look for any substantial text block (>50 chars) after the title
+    # that's not boilerplate
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if len(stripped) > 50 and not any(kw in stripped.lower() for kw in (
+            "log in", "create new", "email or phone", "forgot password",
+            "see more", "loading", "marketplace", "http",
+        )):
+            return stripped[:500]
+
+    return ""
+
+
 def _parse_listings(
     markdown: str, query: str, location_name: str = ""
 ) -> list[dict[str, Any]]:
@@ -230,14 +371,22 @@ def _parse_listings(
 
         # Try to split remainder into title + location
         # FB format: "Title City, ST" — e.g. "Laptop Intel i5 Moquegua, MO"
-        loc_match = re.search(r'\s+(\S+(?:\s+\S+)?),\s*([A-Z]{2})\s*$', remainder)
-        if loc_match:
-            title = remainder[:loc_match.start()].strip()
-            location = loc_match.group(1).strip() + ", " + loc_match.group(2)
-            # If title is empty, the whole remainder was just "City, ST"
-            if not title:
-                title = loc_match.group(1)
-                location = location_name or loc_match.group(2)
+        # Find ", XX" at the end (state code), then take last word before comma as city
+        loc_state_match = re.search(r',\s*([A-Z]{2})\s*$', remainder)
+        if loc_state_match:
+            state = loc_state_match.group(1)
+            before_comma = remainder[:loc_state_match.start()].rstrip()
+            words = before_comma.split()
+            if len(words) >= 2:
+                # Last word is the city name
+                title = " ".join(words[:-1])
+                location = words[-1] + ", " + state
+            elif len(words) == 1:
+                title = words[0]
+                location = location_name or state
+            else:
+                title = before_comma
+                location = location_name or state
         else:
             title = remainder
             location = ""

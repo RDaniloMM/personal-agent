@@ -58,8 +58,19 @@ async def test():
         from fb_worker.crawler import _parse_listings
         listings = _parse_listings(md, "laptop", "moquegua")
         print(f"\n=== PARSED {len(listings)} LISTINGS ===")
-        for i, lst in enumerate(listings[:10]):
+        for i, lst in enumerate(listings[:15]):
             print(f"  [{i}] {lst.get('price')} | {lst.get('title', '')[:60]} | {lst.get('location', '')}")
+
+        # Test description enrichment on first 2 listings
+        if listings:
+            from fb_worker.crawler import enrich_with_descriptions
+            test_items = listings[:2]
+            await enrich_with_descriptions(test_items, max_items=2)
+            print("\n=== DESCRIPTIONS ===")
+            for i, lst in enumerate(test_items):
+                desc = lst.get("description", "")
+                print(f"  [{i}] {lst.get('title', '')[:40]}")
+                print(f"       DESC: {desc[:200] if desc else '(empty)'}")
 
 
 asyncio.run(test())
