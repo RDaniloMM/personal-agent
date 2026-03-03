@@ -9,20 +9,15 @@ OBSIDIAN_FORMATTING_SKILL = """
 
 Aplica SIEMPRE las siguientes reglas al generar contenido Markdown:
 
-### 1. Frontmatter YAML
-Cada nota inicia con un bloque YAML delimitado por `---`:
-```yaml
----
-title: Título de la nota
-date: 2025-01-15
-tags: [paper, ia, agentes]
----
-```
+### 1. Frontmatter YAML y Título
+**NO incluyas frontmatter YAML (bloques `---`) ni encabezado `# Título` principal.**
+El sistema los genera automáticamente. Tu contenido debe empezar directamente
+con el cuerpo de la nota (callouts, secciones `##`, etc.).
 
 ### 2. Estructura de Encabezados
-- `#`  → Título principal (uno solo por nota)
-- `##` → Secciones principales
+- `##` → Secciones principales (nivel más alto que debes usar)
 - `###` → Subsecciones
+- NO uses `#` (reservado para el título, generado automáticamente)
 - NO saltes niveles de encabezado
 
 ### 3. Wiki-Links (obligatorio)
@@ -66,9 +61,10 @@ Usa callouts para resaltar información clave:
 - `código inline` para nombres de modelos, funciones, métricas, hiperparámetros
 
 ### 7. Tags
-- Usa tags descriptivos: `#paper`, `#idea`, `#metodología`, `#framework`, `#benchmark`
-- Usa tags jerárquicos: `#ia/agentes`, `#ia/evaluación`, `#ia/rag`
-- Coloca tags tanto en el frontmatter como inline donde sea relevante
+- Usa tags inline (con `#`) en el cuerpo del texto: `#paper`, `#idea`, `#ia/agentes`
+- Tags jerárquicos: `#ia/agentes`, `#ia/evaluación`, `#ia/rag`
+- NO pongas tags en el frontmatter — el sistema lo hace automáticamente
+- Cuando pases tags como argumento, usa texto plano SIN `#`: `agent`, `evaluation`
 
 ### 8. Tablas Comparativas
 Usa tablas cuando compares modelos, métricas o enfoques:

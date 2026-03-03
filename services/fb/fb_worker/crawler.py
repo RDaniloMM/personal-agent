@@ -152,16 +152,17 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
     )
 
     all_listings: list[dict[str, Any]] = []
-    locations = settings.fb_locations_map  # {name: fb_id}
+    locations = settings.fb_locations_map  # {name: (lat, lng)}
     radius = settings.fb_radius_km
 
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        for loc_name, loc_id in locations.items():
+        for loc_name, (lat, lng) in locations.items():
             for query in settings.fb_search_queries_list:
                 url = (
-                    f"https://www.facebook.com/marketplace/{loc_id}/search"
+                    f"https://www.facebook.com/marketplace/search"
                     f"?query={query.replace(' ', '%20')}"
-                    f"&radius_in_km={radius}"
+                    f"&latitude={lat}&longitude={lng}"
+                    f"&radius={radius}"
                 )
                 logger.info("Crawling FB Marketplace [{}]: {}", loc_name, query)
 
@@ -188,8 +189,60 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
 
                 await asyncio.sleep(5)
 
+    # Filter by expected currency for the region
+    if all_listings:
+        all_listings = _filter_by_region(all_listings, locations)
+
     logger.info("Total FB Marketplace listings scraped: {}", len(all_listings))
     return all_listings
+
+
+# ── Region filter ────────────────────────────────────────────────────────────
+
+# Map lat ranges to expected currencies
+_REGION_CURRENCIES: list[tuple[tuple[float, float], str]] = [
+    ((-60.0, 15.0), "PEN"),   # Latin America default (Peru, etc.)
+    ((15.0, 75.0), "USD"),    # North America
+]
+
+
+def _detect_expected_currency(
+    locations: dict[str, tuple[float, float]],
+) -> str | None:
+    """Detect expected currency from location coordinates."""
+    if not locations:
+        return None
+    # Use first location to determine region
+    lat, _lng = next(iter(locations.values()))
+    for (lat_min, lat_max), currency in _REGION_CURRENCIES:
+        if lat_min <= lat <= lat_max:
+            return currency
+    return None
+
+
+def _filter_by_region(
+    listings: list[dict[str, Any]],
+    locations: dict[str, tuple[float, float]],
+) -> list[dict[str, Any]]:
+    """Filter out listings whose currency doesn't match the search region."""
+    expected = _detect_expected_currency(locations)
+    if not expected:
+        return listings
+
+    # For PEN searches, accept PEN and unknown/empty; reject USD/MXN/BRL
+    # For USD searches, accept USD and unknown/empty; reject PEN/MXN/BRL
+    before = len(listings)
+    filtered = [
+        l for l in listings
+        if not l.get("currency") or l.get("currency") == expected
+    ]
+    removed = before - len(filtered)
+    if removed:
+        logger.info(
+            "Region filter: kept {}/{} listings (removed {} non-{} items)",
+            len(filtered), before, removed, expected,
+        )
+    return filtered
 
 
 # ── JS for item detail page ─────────────────────────────────────────────────
@@ -370,19 +423,38 @@ def _parse_listings(
         remainder = text[pm.end():].strip()
 
         # Try to split remainder into title + location
-        # FB format: "Title City, ST" — e.g. "Laptop Intel i5 Moquegua, MO"
-        # Find ", XX" at the end (state code), then take last word before comma as city
+        # FB format: "Title City Name, ST" — e.g. "Laptop Intel i5 San Francisco, CA"
+        # Strategy: find ", XX" at end (state code), then use known city
+        # patterns for multi-word cities, otherwise take last word as city.
         loc_state_match = re.search(r',\s*([A-Z]{2})\s*$', remainder)
         if loc_state_match:
             state = loc_state_match.group(1)
             before_comma = remainder[:loc_state_match.start()].rstrip()
             words = before_comma.split()
+
+            # Try to detect multi-word city names at the end
+            # Common patterns: "San X", "Los X", "Las X", "New X", "El X",
+            #                  "La X", "Santa X", "Fort X", "Saint X"
+            city_words = 1
             if len(words) >= 2:
-                # Last word is the city name
-                title = " ".join(words[:-1])
-                location = words[-1] + ", " + state
-            elif len(words) == 1:
-                title = words[0]
+                second_last = words[-2].lower()
+                if second_last in (
+                    "san", "los", "las", "new", "el", "la", "santa",
+                    "fort", "saint", "mount", "port", "south", "north",
+                    "east", "west", "del", "de",
+                ):
+                    city_words = 2
+                # Also try 3-word cities: "San Luis Obispo", etc.
+                if len(words) >= 3 and words[-3].lower() in (
+                    "san", "santa", "new", "south", "north",
+                ):
+                    city_words = 3
+
+            if len(words) > city_words:
+                title = " ".join(words[:-city_words])
+                location = " ".join(words[-city_words:]) + ", " + state
+            elif len(words) >= 1:
+                title = " ".join(words)
                 location = location_name or state
             else:
                 title = before_comma

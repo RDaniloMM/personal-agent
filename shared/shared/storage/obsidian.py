@@ -253,6 +253,25 @@ Se encontraron **{len(videos)}** videos relevantes.
     return str(filepath)
 
 
+def _strip_llm_frontmatter(content: str) -> str:
+    """Remove any frontmatter or leading # title the LLM may have added."""
+    text = content.strip()
+    # Strip YAML frontmatter block(s)
+    while text.startswith("---"):
+        end = text.find("---", 3)
+        if end == -1:
+            break
+        text = text[end + 3:].strip()
+    # Strip leading # title line(s)
+    while text.startswith("# "):
+        newline = text.find("\n")
+        if newline == -1:
+            text = ""
+            break
+        text = text[newline + 1:].strip()
+    return text
+
+
 def write_idea_note(
     title: str, content: str, tags: list[str], settings: Settings
 ) -> str:
@@ -272,11 +291,14 @@ def write_idea_note(
         }
     )
 
+    # Sanitise: remove any frontmatter / # title the LLM included
+    clean_content = _strip_llm_frontmatter(content)
+
     body = f"""{fm}
 
 # {title}
 
-{content}
+{clean_content}
 """
     filepath.write_text(body, encoding="utf-8")
     logger.info("Wrote idea note: {}", filepath.name)

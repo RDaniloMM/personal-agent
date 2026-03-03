@@ -39,8 +39,9 @@ _TOOLS = [
                     "content": {
                         "type": "string",
                         "description": (
-                            "Markdown body of the idea note. Include reasoning, "
-                            "cross-references ([[links]]), and actionable takeaways."
+                            "Markdown body of the idea note (NO frontmatter, NO # title). "
+                            "Start directly with the content: callouts, ## sections, "
+                            "bullet points, [[wiki-links]], and actionable takeaways."
                         ),
                     },
                     "tags": {
