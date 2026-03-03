@@ -1,4 +1,4 @@
-"""LangGraph agent state definition."""
+"""Data models shared across all microservices."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class YouTubeVideo:
     upload_date: str = ""
     description: str = ""
     tags: list[str] = field(default_factory=list)
-    subtitles: str = ""  # truncated transcript text
+    subtitles: str = ""
     thumbnail_url: str = ""
     scraped_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     source: str = "youtube"
@@ -59,38 +59,3 @@ class ArxivPaper:
     pdf_url: str
     published: str
     source: str = "arxiv"
-
-
-# ── Agent state ──────────────────────────────────────────────────────────────
-
-TaskType = Literal["fb", "youtube", "arxiv", "all"]
-
-
-@dataclass
-class AgentState:
-    """State that flows through the LangGraph graph.
-
-    Using a dataclass rather than TypedDict so we get default values
-    and methods.  LangGraph ≥ 0.4 supports dataclass states natively.
-    """
-
-    task_type: TaskType = "all"
-
-    # Collected raw data (each node appends to the relevant list)
-    marketplace_listings: list[dict[str, Any]] = field(default_factory=list)
-    youtube_videos: list[dict[str, Any]] = field(default_factory=list)
-    arxiv_papers: list[dict[str, Any]] = field(default_factory=list)
-
-    # Vectors indexed in this run
-    vectors_indexed: int = 0
-
-    # Obsidian notes written in this run
-    notes_written: list[str] = field(default_factory=list)
-
-    # Error tracking
-    errors: list[str] = field(default_factory=list)
-    retry_count: int = 0
-    max_retries: int = 2
-
-    # Metadata
-    run_started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())

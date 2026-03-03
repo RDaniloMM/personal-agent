@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import asdict
 from typing import Any
 
@@ -25,20 +26,57 @@ SCROLL_JS = """
 })();
 """
 
-# ── Extraction prompt for LLM-based strategy ────────────────────────────────
+# ── Price parsing ────────────────────────────────────────────────────────────
 
-EXTRACTION_PROMPT = """
-Extract all product listings visible on this Facebook Marketplace page.
-For each listing, return a JSON object with these fields:
-- title: product name/title
-- price: price as shown (include currency symbol)
-- location: city or area
-- url: link to the listing (relative or absolute)
-- image_url: URL of the product image
-- description: short description if available
+_PRICE_RE = re.compile(
+    r"""
+    (?:S/\.?\s*|PEN\s*|US?\$\s*|\$\s*)   # currency prefix
+    ([\d,.\s]+)                            # digits with separators
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
 
-Return a JSON array of objects. If no listings are found, return [].
-"""
+
+def _parse_price(text: str) -> tuple[float, str]:
+    """Extract numeric price and currency from a price string.
+
+    Returns (numeric_price, currency).  Returns (0.0, "") on failure.
+    Examples:
+        "S/ 1,200"   → (1200.0, "PEN")
+        "S/. 450"    → (450.0, "PEN")
+        "$200"       → (200.0, "USD")
+        "US$ 99"     → (99.0, "USD")
+        "Gratis"     → (0.0, "PEN")
+    """
+    if not text:
+        return 0.0, ""
+
+    text_lower = text.lower().strip()
+    if text_lower in ("gratis", "free", "regalo"):
+        return 0.0, "PEN"
+
+    # Detect currency
+    currency = "PEN"
+    if "us$" in text_lower or text_lower.startswith("$"):
+        currency = "USD"
+
+    m = _PRICE_RE.search(text)
+    if not m:
+        # Try bare number
+        bare = re.search(r"([\d,.\s]+)", text)
+        if bare:
+            num_str = bare.group(1).replace(",", "").replace(" ", "").strip()
+            try:
+                return float(num_str), currency
+            except ValueError:
+                return 0.0, ""
+        return 0.0, ""
+
+    num_str = m.group(1).replace(",", "").replace(" ", "").strip()
+    try:
+        return float(num_str), currency
+    except ValueError:
+        return 0.0, ""
 
 
 async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
@@ -144,6 +182,8 @@ def _parse_listings(
 
     Uses a heuristic approach: each listing block typically has a price line,
     a title line, and a location line.  Falls back to raw text chunks.
+
+    Filters out listings with price = 0 (free / contact for price / invalid).
     """
     listings: list[dict[str, Any]] = []
     current: dict[str, Any] = {}
@@ -179,17 +219,30 @@ def _parse_listings(
     if current.get("title"):
         listings.append(current)
 
-    # Normalize into MarketplaceListing dicts
+    # Normalize into MarketplaceListing dicts, filtering out price=0
     normalized: list[dict[str, Any]] = []
     for item in listings:
+        price_str = item.get("price", "")
+        price_num, currency = _parse_price(price_str)
+
+        # Skip items with no price or price = 0
+        if price_num <= 0:
+            continue
+
         listing = MarketplaceListing(
             title=item.get("title", ""),
-            price=item.get("price", ""),
+            price=price_str,
             location=item.get("location", location),
             url=item.get("url", ""),
             image_url=item.get("image_url", ""),
             description=item.get("description", ""),
+            price_numeric=price_num,
+            currency=currency,
         )
         normalized.append(asdict(listing))
 
+    logger.debug(
+        "Parsed {} listings, {} after filtering price=0",
+        len(listings), len(normalized),
+    )
     return normalized

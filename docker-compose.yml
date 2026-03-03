@@ -17,11 +17,12 @@ services:
       timeout: 5s
       retries: 5
 
-  agent:
+  # ── YouTube worker (yt-dlp + API, ~1-2 min build) ──────────────────────
+  yt-worker:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: personal-agent
+      dockerfile: services/youtube/Dockerfile
+    container_name: personal-agent-yt
     restart: unless-stopped
     depends_on:
       db:
@@ -30,35 +31,92 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
       - OBSIDIAN_VAULT_PATH=/app/vault
       - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
+      - BROWSER_PROFILES_DIR=/app/profiles
     volumes:
-      # Persistent browser profiles (pre-created on a desktop machine)
       - ./profiles:/app/profiles
-
-      # Logs
       - ./logs:/app/logs
-
-      # Obsidian vault – local directory for testing
-      # For production, mount your OneDrive/vault here
       - ./vault:/app/vault
-
-      # UV cache – persists downloaded packages between container recreations
-      - uv-cache:/root/.cache/uv
-
-    # Default: scheduler daemon
-    command: ["uv", "run", "python", "-m", "src.main"]
-
-    # Health check: verify the process is running
+      - uv-cache-yt:/root/.cache/uv
+    command: ["uv", "run", "python", "-m", "yt_worker.main"]
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "src.main"]
+      test: ["CMD", "pgrep", "-f", "yt_worker.main"]
       interval: 60s
       timeout: 10s
       retries: 3
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
 
-    # Resource limits
+  # ── Arxiv worker (arxiv lib, ~1 min build) ─────────────────────────────
+  arxiv-worker:
+    build:
+      context: .
+      dockerfile: services/arxiv/Dockerfile
+    container_name: personal-agent-arxiv
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OBSIDIAN_VAULT_PATH=/app/vault
+      - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
+      - BROWSER_PROFILES_DIR=/app/profiles
+    volumes:
+      - ./logs:/app/logs
+      - ./vault:/app/vault
+      - uv-cache-arxiv:/root/.cache/uv
+    command: ["uv", "run", "python", "-m", "arxiv_worker.main"]
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "arxiv_worker.main"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # ── FB Marketplace worker (Playwright + crawl4ai, ~6 min build) ────────
+  fb-worker:
+    build:
+      context: .
+      dockerfile: services/fb/Dockerfile
+    container_name: personal-agent-fb
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OBSIDIAN_VAULT_PATH=/app/vault
+      - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
+      - BROWSER_PROFILES_DIR=/app/profiles
+    volumes:
+      - ./profiles:/app/profiles
+      - ./logs:/app/logs
+      - ./vault:/app/vault
+      - uv-cache-fb:/root/.cache/uv
+    command: ["uv", "run", "python", "-m", "fb_worker.main"]
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "fb_worker.main"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -68,4 +126,6 @@ services:
 
 volumes:
   pgdata:
-  uv-cache:
+  uv-cache-yt:
+  uv-cache-arxiv:
+  uv-cache-fb:

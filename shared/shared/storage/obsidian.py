@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from src.config import Settings
+from shared.config import Settings
 
 
 # ── Frontmatter helper ───────────────────────────────────────────────────────
@@ -53,16 +53,12 @@ def _safe_filename(text: str, max_len: int = 80) -> str:
 
 
 def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
-    """Write a single Arxiv paper as a Markdown note with LLM analysis.
-
-    Returns the path of the created file.
-    """
+    """Write a single Arxiv paper as a Markdown note with LLM analysis."""
     folder = settings.obsidian_subfolder("Papers")
     filename = _safe_filename(paper.get("title", "paper")) + ".md"
     filepath = folder / filename
 
     if filepath.exists():
-        # Overwrite notes that were written with a failed analysis
         existing = filepath.read_text(encoding="utf-8")
         if "Error en análisis" not in existing and "Análisis no disponible" not in existing:
             logger.debug("Paper note already exists: {}", filepath.name)
@@ -85,7 +81,6 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
         }
     )
 
-    # Build analysis sections from LLM output
     summary = paper.get("summary", "")
     conclusions = paper.get("conclusions", "")
     contributions = paper.get("contributions", "")
@@ -124,10 +119,7 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
 def write_marketplace_summary(
     listings: list[dict[str, Any]], settings: Settings
 ) -> str:
-    """Write a daily summary of FB Marketplace deals (only great bargains).
-
-    If no deals were found, writes a brief note saying so.
-    """
+    """Write a daily summary of FB Marketplace deals (only great bargains)."""
     folder = settings.obsidian_subfolder("FB-Marketplace")
     date_str = datetime.now(UTC).strftime("%Y-%m-%d")
     filename = f"deals-{date_str}.md"
@@ -163,7 +155,6 @@ def write_marketplace_summary(
     for item in deals[:30]:
         title = item.get("title", "Sin título")
         price = item.get("price", "N/A")
-        price_num = item.get("price_numeric", 0)
         location = item.get("location", "N/A")
         url = item.get("url", "")
         reason = item.get("deal_reason", "")

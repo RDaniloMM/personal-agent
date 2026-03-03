@@ -1,0 +1,17 @@
+[project]
+name = "arxiv-worker"
+version = "0.1.0"
+description = "Arxiv paper collector and analyzer"
+requires-python = ">=3.12"
+dependencies = [
+    "shared",
+    "arxiv>=2.1",
+    "apscheduler>=3.10,<4",
+]
+
+[tool.uv.sources]
+shared = { path = "../../shared" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

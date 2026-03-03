@@ -1,0 +1,20 @@
+[project]
+name = "yt-worker"
+version = "0.1.0"
+description = "YouTube worker – yt-dlp search + API feeds + enrichment"
+requires-python = ">=3.12"
+dependencies = [
+    "shared",
+    "yt-dlp>=2024.0",
+    "google-api-python-client>=2.100",
+    "google-auth-oauthlib>=1.1",
+    "google-auth-httplib2>=0.2",
+    "apscheduler>=3.10,<4",
+]
+
+[tool.uv.sources]
+shared = { path = "../../shared" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
