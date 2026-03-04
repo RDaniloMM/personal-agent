@@ -34,11 +34,17 @@ personal-agent/
 │   └── youtube/             # YouTube worker
 │       ├── yt_worker/
 │       │   ├── main.py      # Pipeline: discover → enrich → index → notes
-│       │   └── crawler.py   # yt-dlp search + YouTube Data API + subtitle extraction
+│       │   ├── crawler.py   # yt-dlp search + YouTube Data API + subtitle extraction
+│       │   └── auth.py      # YouTube OAuth2 token management
 │       └── tests/
 │           └── test_e2e_yt.py
+├── scripts/
+│   ├── deploy-to-server.ps1 # SCP deploy + docker compose build/restart
+│   ├── sync-from-server.ps1 # Sync vault notes + logs from server to local
+│   └── server-status.ps1    # Check container status
 ├── docker-compose.yml       # 4 services: db, fb-worker, arxiv-worker, yt-worker
-└── .env                     # Secrets & config (LLM_API_KEY, EMBEDDING_API_KEY, etc.)
+├── .env                     # Secrets & config (LLM_API_KEY, EMBEDDING_API_KEY, etc.)
+└── AGENTS.md                # This file
 ```
 
 ## Key Technologies
