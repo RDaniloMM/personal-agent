@@ -97,10 +97,10 @@ def main() -> None:
         asyncio.run(run_pipeline())
         return
 
-    logger.info("Starting YouTube worker daemon (hours: {})", settings.scrape_hours_list)
+    logger.info("Starting YouTube worker daemon (hours: {})", settings.yt_scrape_hours_list)
     scheduler = AsyncIOScheduler()
 
-    hours_str = ",".join(str(h) for h in settings.scrape_hours_list)
+    hours_str = ",".join(str(h) for h in settings.yt_scrape_hours_list)
     scheduler.add_job(
         run_pipeline,
         CronTrigger(hour=hours_str),

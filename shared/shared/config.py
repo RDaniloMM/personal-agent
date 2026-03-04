@@ -51,7 +51,8 @@ class Settings(BaseSettings):
     fb_profile_name: str = Field("fb-profile", description="Profile name for Facebook")
 
     # ── Scheduler ────────────────────────────────────
-    scrape_hours: str = Field("8,20", description="Comma-separated hours for FB+YT scraping")
+    scrape_hours: str = Field("8,20", description="Comma-separated hours for FB scraping")
+    yt_scrape_hours: str = Field("9", description="Comma-separated hours for YT scraping")
     arxiv_hour: int = Field(7, description="Hour of day (0-23) to collect Arxiv papers")
 
     # ── FB Marketplace ───────────────────────────────
@@ -76,6 +77,10 @@ class Settings(BaseSettings):
     @property
     def scrape_hours_list(self) -> list[int]:
         return [int(h.strip()) for h in self.scrape_hours.split(",")]
+
+    @property
+    def yt_scrape_hours_list(self) -> list[int]:
+        return [int(h.strip()) for h in self.yt_scrape_hours.split(",")]
 
     @property
     def fb_search_queries_list(self) -> list[str]:

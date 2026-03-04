@@ -17,6 +17,9 @@ profiles/
 # Vector store data
 data/
 
+# Obsidian vault (server mount)
+vault/
+
 # IDE
 .vscode/
 .idea/

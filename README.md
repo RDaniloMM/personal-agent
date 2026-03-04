@@ -1,102 +1,97 @@
 # 🤖 Personal Agent
 
-Agente autónomo de IA que recopila datos de FB Marketplace, YouTube y Arxiv, los indexa en una base de datos vectorial (PostgreSQL + pgvector) y genera notas inteligentes en tu vault de Obsidian.
+Agente autónomo de IA que recopila datos de **FB Marketplace**, **YouTube** y **Arxiv**, los analiza con LLM (Groq), los indexa en PostgreSQL + pgvector, y genera notas inteligentes en tu vault de **Obsidian**. Desplegado como microservicios Docker en un servidor casero.
 
 ## Arquitectura
 
 ```
-START
-  │
-  ├─▶ scrape_fb ──────┐
-  ├─▶ scrape_youtube ─┤  (fan-out condicional)
-  └─▶ collect_arxiv ──┘
-                       │
-                 index_vectors (pgvector)
-                       │
-                write_obsidian (LLM Groq)
-                       │
-                      END
+personal-agent/
+├── shared/              # Librería compartida (Settings, storage, writer)
+├── services/
+│   ├── fb/              # FB Marketplace worker (Crawl4AI + Playwright)
+│   ├── arxiv/           # Arxiv paper worker (arxiv.py)
+│   └── youtube/         # YouTube worker (yt-dlp + API v3)
+├── scripts/             # Deploy, sync, status
+├── docker-compose.yml   # 4 servicios: db, fb-worker, arxiv-worker, yt-worker
+└── AGENTS.md            # Documentación técnica detallada
 ```
 
-**Stack:** LangGraph · Crawl4AI · Playwright · arxiv.py · PostgreSQL + pgvector · Groq (Llama 3.3) · APScheduler · Docker
+Cada worker es un contenedor independiente con su propio pipeline lineal:
+
+```
+Crawl / Collect → Triage (LLM) → Analyze (LLM) → Index (pgvector) → Notes (Obsidian)
+```
+
+**Stack:** Python 3.12 · uv · Groq (GPT-OSS-120b) · Crawl4AI · Playwright · yt-dlp · arxiv.py · PostgreSQL + pgvector · APScheduler · Docker Compose
 
 ## Requisitos
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) (gestor de paquetes)
-- Docker & Docker Compose (para deploy en servidor)
-- API key de Groq (LLM) y OpenAI (embeddings)
-- Vault de Obsidian accesible por filesystem
+- Docker & Docker Compose
+- [uv](https://docs.astral.sh/uv/) (gestor de paquetes, usado dentro de los containers)
+- API key de [Groq](https://console.groq.com/) (LLM)
+- API key de [OpenAI](https://platform.openai.com/) (embeddings)
+- Servidor Linux con acceso SSH (para deploy)
 
-## Instalación
+## Instalación y deploy
 
 ```bash
-# 1. Clonar y entrar al proyecto
-cd personal-agent
+# 1. Clonar el repositorio
+git clone <repo> && cd personal-agent
 
-# 2. Instalar dependencias (uv crea el venv automáticamente)
-uv sync
-
-# 3. Instalar browsers de Playwright
-uv run playwright install chromium --with-deps
-
-# 4. Configurar variables de entorno
+# 2. Configurar variables de entorno
 cp .env.example .env
-# Editar .env con tus API keys (LLM_API_KEY, EMBEDDING_API_KEY) y rutas
+# Editar .env con tus API keys y rutas
+
+# 3. Construir y levantar todos los servicios
+docker compose up -d --build
+
+# 4. Ver estado
+docker compose ps
+docker compose logs -f fb-worker
 ```
 
-## Configuración de perfiles de navegador
+## Configuración
 
-Para scraping autenticado de FB Marketplace y YouTube, necesitas crear perfiles de browser persistentes **una sola vez** desde una máquina con display:
+Ver [.env.example](.env.example) para todas las variables. Las principales:
 
-```bash
-# Crear perfil de Facebook (se abre Chromium, inicia sesión manualmente)
-python -m src.scrapers.browser_profiles fb
-
-# Crear perfil de Google/YouTube
-python -m src.scrapers.browser_profiles google
-
-# Listar perfiles existentes
-python -m src.scrapers.browser_profiles list
-```
-
-Los perfiles se guardan en `profiles/` y contienen cookies, localStorage, etc.
+| Variable              | Descripción                                               |
+| --------------------- | --------------------------------------------------------- |
+| `LLM_API_KEY`         | API key de Groq                                           |
+| `EMBEDDING_API_KEY`   | API key de OpenAI (embeddings)                            |
+| `FB_LOCATIONS`        | `nombre:fb_location_id,...` (ej: `tacna:111957248821463`) |
+| `FB_SEARCH_QUERIES`   | Queries separadas por coma                                |
+| `OBSIDIAN_VAULT_PATH` | Ruta al vault (dentro del container: `/app/vault`)        |
 
 ## Uso
 
-### Ejecución única (testing)
+### Ejecución programada (producción)
+
+Los workers corren como daemons con APScheduler. Horarios por defecto:
+
+| Worker       | Horario              | Configurable en   |
+| ------------ | -------------------- | ----------------- |
+| fb-worker    | 2x/día (8:00, 20:00) | `SCRAPE_HOURS`    |
+| yt-worker    | 1x/día (9:00)        | `YT_SCRAPE_HOURS` |
+| arxiv-worker | 1x/día (07:00)       | `ARXIV_HOUR`      |
+
+### Ejecución manual (testing)
 
 ```bash
-# Ejecutar todas las tareas
-python -m src.main --run-once --task all
-
-# Solo Arxiv
-python -m src.main --run-once --task arxiv
-
-# Solo FB Marketplace
-python -m src.main --run-once --task fb
-
-# Solo YouTube
-python -m src.main --run-once --task youtube
+# Run-once de un worker específico
+docker compose run --rm fb-worker uv run python -m fb_worker.main --run-once
+docker compose run --rm arxiv-worker uv run python -m arxiv_worker.main --run-once
+docker compose run --rm yt-worker uv run python -m yt_worker.main --run-once
 ```
 
-### Modo daemon (servidor 24/7)
+### Tests E2E
+
+Cada worker incluye un smoke test que ejecuta el pipeline real con datos mínimos:
 
 ```bash
-# Directo
-python -m src.main
-
-# Con Docker
-docker compose up -d
-docker compose logs -f
+docker compose run --rm arxiv-worker uv run python -m tests.test_e2e_arxiv   # ~30s
+docker compose run --rm yt-worker uv run python -m tests.test_e2e_yt         # ~20s
+docker compose run --rm fb-worker uv run python -m tests.test_e2e_fb         # ~2 min
 ```
-
-### Horarios por defecto
-
-| Tarea                    | Frecuencia           | Configurable en |
-| ------------------------ | -------------------- | --------------- |
-| FB Marketplace + YouTube | 2x/día (8:00, 20:00) | `SCRAPE_HOURS`  |
-| Arxiv papers             | 1x/día (07:00)       | `ARXIV_HOUR`    |
 
 ## Estructura del vault de Obsidian
 
@@ -113,41 +108,39 @@ Segundo cerebro/
 
 Cada nota incluye frontmatter YAML con tags para fácil búsqueda en Obsidian.
 
-## Docker (producción)
+## Scripts de administración
 
-```bash
-# Construir y levantar
-docker compose up -d --build
+```powershell
+# Desplegar cambios al servidor
+.\scripts\deploy-to-server.ps1
 
-# Ver logs
-docker compose logs -f agent
+# Sincronizar vault y logs del servidor a local
+.\scripts\sync-from-server.ps1
 
-# Detener
-docker compose down
+# Ver estado de contenedores
+.\scripts\server-status.ps1
 ```
 
-**Importante:** Los perfiles de browser deben crearse **antes** de desplegar en Docker. Copiar la carpeta `profiles/` al servidor.
-
-Para sincronizar el vault de Obsidian con OneDrive en el servidor Linux:
+## Operaciones en servidor
 
 ```bash
-# Opción: montar OneDrive con rclone
-rclone mount onedrive: /mnt/onedrive --vfs-cache-mode writes &
+# Reconstruir un worker específico
+ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose build --no-cache fb-worker'
+
+# Reiniciar workers
+ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose up -d fb-worker arxiv-worker yt-worker'
+
+# Ver logs en tiempo real
+ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose logs -f fb-worker'
 ```
-
-## Tests
-
-```bash
-uv run pytest tests/ -v
-```
-
-## Variables de entorno
-
-Ver [.env.example](.env.example) para todas las opciones configurables.
 
 ## ⚠️ Notas importantes
 
-- **ToS de Facebook/YouTube:** El scraping autenticado de estas plataformas puede violar sus términos de servicio. Este proyecto es para **uso personal** únicamente.
-- **Rate limiting:** El agente incluye delays entre requests (5-10s) para evitar bloqueos.
-- **Perfiles de browser:** Contienen tus cookies de sesión. **No los compartas ni los subas a Git.**
-- **pgvector:** Extensión de PostgreSQL para búsqueda vectorial. Se ejecuta como servicio Docker independiente con persistencia en volumen `pgdata`.
+- **ToS de Facebook/YouTube:** El scraping de estas plataformas puede violar sus términos de servicio. Este proyecto es para **uso personal** únicamente.
+- **Rate limiting:** El agente incluye delays entre requests para evitar bloqueos.
+- **MercadoLibre API:** La API pública de búsqueda puede retornar 403 — el pipeline FB degrada gracefully sin precios de referencia.
+- **pgvector:** Extensión de PostgreSQL para búsqueda vectorial. Se ejecuta como servicio Docker con persistencia en volumen `pgdata`.
+
+## Documentación técnica
+
+Ver [AGENTS.md](AGENTS.md) para detalles completos de arquitectura, pipelines, notas de integración LLM, y guía de deploy.
