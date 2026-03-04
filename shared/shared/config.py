@@ -60,8 +60,8 @@ class Settings(BaseSettings):
         description="Comma-separated search queries for FB Marketplace",
     )
     fb_locations: str = Field(
-        "tacna:-18.0146:-70.2536,moquegua:-17.1939:-70.9353",
-        description="Comma-separated name:lat:lng for FB Marketplace locations",
+        "tacna:111957248821463,moquegua:108444959180261",
+        description="Comma-separated name:fb_location_id for FB Marketplace locations",
     )
     fb_radius_km: int = Field(40, description="Radius in km for FB Marketplace location search")
 
@@ -86,20 +86,16 @@ class Settings(BaseSettings):
         return [loc.strip() for loc in self.fb_locations.split(",")]
 
     @property
-    def fb_locations_map(self) -> dict[str, tuple[float, float]]:
-        """Return {name: (lat, lng)} from 'name:lat:lng,name:lat:lng' format."""
-        result: dict[str, tuple[float, float]] = {}
+    def fb_locations_map(self) -> dict[str, str]:
+        """Return {name: fb_location_id} from 'name:id,name:id' format."""
+        result: dict[str, str] = {}
         for item in self.fb_locations.split(","):
             item = item.strip()
             parts = item.split(":")
-            if len(parts) == 3:
+            if len(parts) == 2:
                 name = parts[0].strip()
-                try:
-                    lat = float(parts[1].strip())
-                    lng = float(parts[2].strip())
-                    result[name] = (lat, lng)
-                except ValueError:
-                    pass
+                loc_id = parts[1].strip()
+                result[name] = loc_id
         return result
 
     @property

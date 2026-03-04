@@ -28,6 +28,7 @@ RUN uv run playwright install chromium --with-deps
 
 # 5. Service source (changes most often → last layer)
 COPY services/fb/fb_worker/ ./fb_worker/
+COPY services/fb/tests/ ./tests/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev
 

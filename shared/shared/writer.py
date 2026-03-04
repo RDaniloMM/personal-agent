@@ -82,12 +82,15 @@ IMPORTANTE: En el contenido de cada nota, usa formato Obsidian completo:
 async def extract_ideas(
     data_summary: str,
     settings: Settings,
+    *,
+    reasoning_effort: str = "medium",
 ) -> list[dict[str, Any]]:
     """Use LLM with tool calling to extract key ideas from a data summary.
 
     Args:
         data_summary: Pre-built text describing today's collected data.
         settings: App settings with LLM credentials.
+        reasoning_effort: Groq reasoning level – "low", "medium", or "high".
 
     Returns:
         List of idea dicts with title, content, tags.
@@ -113,6 +116,9 @@ async def extract_ideas(
         tools=_TOOLS,
         tool_choice="auto",
         max_tokens=4096,
+        extra_body={
+            "reasoning_effort": reasoning_effort,
+        },
     )
 
     ideas: list[dict[str, Any]] = []
@@ -134,9 +140,11 @@ async def extract_ideas(
 async def extract_and_write_ideas(
     data_summary: str,
     settings: Settings,
+    *,
+    reasoning_effort: str = "medium",
 ) -> list[str]:
     """Extract ideas via LLM and write them to Obsidian. Returns note paths."""
-    ideas = await extract_ideas(data_summary, settings)
+    ideas = await extract_ideas(data_summary, settings, reasoning_effort=reasoning_effort)
     paths: list[str] = []
     for idea in ideas:
         try:

@@ -84,7 +84,7 @@ async def run_pipeline() -> None:
 
     if deals:
         summary = _build_summary(deals)
-        await extract_and_write_ideas(summary, settings)
+        await extract_and_write_ideas(summary, settings, reasoning_effort="medium")
 
     logger.info("✓ FB pipeline complete | deals={} | indexed={}", len(deals), indexed)
 

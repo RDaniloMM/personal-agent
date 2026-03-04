@@ -73,7 +73,7 @@ async def run_pipeline() -> None:
 
     if videos:
         summary = _build_summary(videos)
-        await extract_and_write_ideas(summary, settings)
+        await extract_and_write_ideas(summary, settings, reasoning_effort="medium")
 
     logger.info("✓ YouTube pipeline complete | videos={} | indexed={}", len(videos), indexed)
 

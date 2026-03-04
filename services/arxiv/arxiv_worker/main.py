@@ -83,7 +83,7 @@ async def run_pipeline() -> None:
 
     if analyzed:
         summary = _build_summary(analyzed)
-        await extract_and_write_ideas(summary, settings)
+        await extract_and_write_ideas(summary, settings, reasoning_effort="high")
 
     logger.info(
         "✓ Arxiv pipeline complete | papers={} | analyzed={} | indexed={}",

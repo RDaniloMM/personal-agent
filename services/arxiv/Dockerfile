@@ -15,6 +15,7 @@ RUN uv sync --no-dev --no-install-project
 
 # Layer 3: service source (changes frequently)
 COPY services/arxiv/arxiv_worker/ /app/services/arxiv/arxiv_worker/
+COPY services/arxiv/tests/ /app/services/arxiv/tests/
 RUN uv sync --no-dev
 
 CMD ["uv", "run", "python", "-m", "arxiv_worker.main"]

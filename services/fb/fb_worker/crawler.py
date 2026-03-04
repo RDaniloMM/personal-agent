@@ -86,13 +86,17 @@ def _parse_price(text: str) -> tuple[float, str]:
     if text_lower in ("gratis", "free", "regalo"):
         return 0.0, "PEN"
 
+    # Detect currency only from explicit prefixes
     currency = "PEN"
-    if "us$" in text_lower or (text_lower.startswith("$") and "mx$" not in text_lower):
+    if "s/." in text_lower or "s/" in text_lower or "pen" in text_lower:
+        currency = "PEN"
+    elif "us$" in text_lower:
         currency = "USD"
     elif "mx$" in text_lower:
         currency = "MXN"
     elif "r$" in text_lower:
         currency = "BRL"
+    # Bare "$" is ambiguous — keep as PEN when searching in PEN regions
 
     m = _PRICE_RE.search(text)
     if not m:
@@ -132,6 +136,10 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
         headers={
             "Accept-Language": "es-PE,es;q=0.9,en;q=0.5",
         },
+        init_scripts=[
+            # Hide automation indicators before any page script runs
+            "Object.defineProperty(navigator, 'webdriver', {get: () => false})",
+        ],
     )
 
     wait_selectors = [
@@ -152,16 +160,15 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
     )
 
     all_listings: list[dict[str, Any]] = []
-    locations = settings.fb_locations_map  # {name: (lat, lng)}
+    locations = settings.fb_locations_map  # {name: fb_location_id}
     radius = settings.fb_radius_km
 
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        for loc_name, (lat, lng) in locations.items():
+        for loc_name, loc_id in locations.items():
             for query in settings.fb_search_queries_list:
                 url = (
-                    f"https://www.facebook.com/marketplace/search"
+                    f"https://www.facebook.com/marketplace/{loc_id}/search"
                     f"?query={query.replace(' ', '%20')}"
-                    f"&latitude={lat}&longitude={lng}"
                     f"&radius={radius}"
                 )
                 logger.info("Crawling FB Marketplace [{}]: {}", loc_name, query)
@@ -184,63 +191,84 @@ async def crawl_fb_marketplace(settings: Settings) -> list[dict[str, Any]]:
                     continue
 
                 listings = _parse_listings(result.markdown, query, loc_name)
+
+                # Filter out listings not in the target country
+                if listings:
+                    listings = _filter_by_location(listings, loc_name)
+
                 all_listings.extend(listings)
                 logger.info("Found {} listings for '{}' [{}]", len(listings), query, loc_name)
 
                 await asyncio.sleep(5)
 
-    # Filter by expected currency for the region
-    if all_listings:
-        all_listings = _filter_by_region(all_listings, locations)
-
     logger.info("Total FB Marketplace listings scraped: {}", len(all_listings))
     return all_listings
 
 
-# ── Region filter ────────────────────────────────────────────────────────────
+# ── Location filter ───────────────────────────────────────────────────────────
 
-# Map lat ranges to expected currencies
-_REGION_CURRENCIES: list[tuple[tuple[float, float], str]] = [
-    ((-60.0, 15.0), "PEN"),   # Latin America default (Peru, etc.)
-    ((15.0, 75.0), "USD"),    # North America
-]
+# Known Peruvian departments + capital cities (lowercased for matching).
+# FB returns US results for guest sessions, so we whitelist Peruvian locations.
+# Matching is done per comma-separated segment (exact match) to avoid false
+# positives like "South Gate, CA" matching "ate".
+_PERU_LOCATIONS: set[str] = {
+    # Country
+    "perú", "peru",
+    # Departments
+    "amazonas", "ancash", "áncash", "apurímac", "apurimac", "arequipa",
+    "ayacucho", "cajamarca", "callao", "cusco", "cuzco",
+    "huancavelica", "huánuco", "huanuco", "ica", "junín", "junin",
+    "la libertad", "lambayeque", "lima", "loreto",
+    "madre de dios", "moquegua", "pasco", "piura", "puno",
+    "san martín", "san martin", "tacna", "tumbes", "ucayali",
+    # Capital cities / major cities
+    "chachapoyas", "huaraz", "abancay", "huamanga", "trujillo",
+    "chiclayo", "huancayo", "iquitos", "puerto maldonado",
+    "cerro de pasco", "moyobamba", "tarapoto", "pucallpa",
+    "sullana", "juliaca", "chimbote", "ilo",
+    "chincha", "nazca", "huacho", "barranca", "cañete",
+    "san juan de lurigancho", "los olivos", "surco",
+    "miraflores", "san isidro", "chorrillos", "villa el salvador",
+    "san miguel", "breña", "pueblo libre", "jesús maría",
+    "la molina", "magdalena", "lince", "independencia",
+    "comas", "carabayllo", "puente piedra", "lurín", "ate",
+    "arica",  # border region
+}
 
 
-def _detect_expected_currency(
-    locations: dict[str, tuple[float, float]],
-) -> str | None:
-    """Detect expected currency from location coordinates."""
-    if not locations:
-        return None
-    # Use first location to determine region
-    lat, _lng = next(iter(locations.values()))
-    for (lat_min, lat_max), currency in _REGION_CURRENCIES:
-        if lat_min <= lat <= lat_max:
-            return currency
-    return None
-
-
-def _filter_by_region(
+def _filter_by_location(
     listings: list[dict[str, Any]],
-    locations: dict[str, tuple[float, float]],
+    target_location: str,
 ) -> list[dict[str, Any]]:
-    """Filter out listings whose currency doesn't match the search region."""
-    expected = _detect_expected_currency(locations)
-    if not expected:
-        return listings
+    """Keep only listings from Peruvian locations (whitelist approach).
 
-    # For PEN searches, accept PEN and unknown/empty; reject USD/MXN/BRL
-    # For USD searches, accept USD and unknown/empty; reject PEN/MXN/BRL
+    FB Marketplace ignores lat/lng for guest (non-authenticated) sessions and
+    often returns US-based listings.  We keep a listing only when its location
+    field matches a known Peruvian city/department, or when the location is
+    empty (benefit of the doubt).
+
+    Matching is done per comma-separated segment (exact, case-insensitive)
+    to avoid false positives like "South Gate" matching "ate".
+    """
     before = len(listings)
-    filtered = [
-        l for l in listings
-        if not l.get("currency") or l.get("currency") == expected
-    ]
+    filtered: list[dict[str, Any]] = []
+    for listing in listings:
+        loc = (listing.get("location") or "").strip()
+        if not loc:
+            filtered.append(listing)  # no location → keep
+            continue
+        # Split "City, State/Country" into segments and check each
+        segments = [s.strip().lower() for s in loc.split(",")]
+        if any(seg in _PERU_LOCATIONS for seg in segments):
+            filtered.append(listing)
+            continue
+        # Otherwise skip (likely US or other country)
+
     removed = before - len(filtered)
     if removed:
         logger.info(
-            "Region filter: kept {}/{} listings (removed {} non-{} items)",
-            len(filtered), before, removed, expected,
+            "Location filter [{}]: kept {}/{} (removed {} non-local listings)",
+            target_location, len(filtered), before, removed,
         )
     return filtered
 

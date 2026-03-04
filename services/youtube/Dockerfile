@@ -20,6 +20,7 @@ RUN uv sync --no-dev --no-install-project
 
 # Layer 3: service source (changes frequently)
 COPY services/youtube/yt_worker/ /app/services/youtube/yt_worker/
+COPY services/youtube/tests/ /app/services/youtube/tests/
 RUN uv sync --no-dev
 
 CMD ["uv", "run", "python", "-m", "yt_worker.main"]

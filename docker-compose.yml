@@ -7,6 +7,7 @@ services:
       POSTGRES_USER: agent
       POSTGRES_PASSWORD: agent_secret
       POSTGRES_DB: agent_vectors
+      TZ: America/Lima
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -34,6 +35,7 @@ services:
       - OBSIDIAN_VAULT_PATH=/app/vault
       - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
       - BROWSER_PROFILES_DIR=/app/profiles
+      - TZ=America/Lima
     volumes:
       - ./profiles:/app/profiles
       - ./logs:/app/logs
@@ -70,6 +72,7 @@ services:
       - OBSIDIAN_VAULT_PATH=/app/vault
       - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
       - BROWSER_PROFILES_DIR=/app/profiles
+      - TZ=America/Lima
     volumes:
       - ./logs:/app/logs
       - ./vault:/app/vault
@@ -105,6 +108,7 @@ services:
       - OBSIDIAN_VAULT_PATH=/app/vault
       - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
       - BROWSER_PROFILES_DIR=/app/profiles
+      - TZ=America/Lima
     volumes:
       - ./profiles:/app/profiles
       - ./logs:/app/logs
