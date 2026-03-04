@@ -74,7 +74,7 @@ Required variables:
 1. **Crawl** — Iterates `locations × queries`, scrapes listings via Crawl4AI
 2. **Location filter** — Whitelist of ~60 Peruvian cities, exact segment matching
 3. **Deal triage** — LLM classifies each listing as `deal`/`maybe`/`skip` (JSON mode)
-4. **Price research** — Searches MercadoLibre Peru API for real market prices
+4. **Price research** — Searches MercadoLibre Peru API for real market prices (⚠️ ML API may require auth token — returns 403 without it; pipeline degrades gracefully)
 5. **Deal analysis** — LLM compares listing vs ML prices, uses `calculate` tool
 6. **Index** — pgvector dedup by URL
 7. **Notes** — Obsidian summary + LLM idea extraction
@@ -101,6 +101,7 @@ Required variables:
 - **JSON mode** (`response_format={"type": "json_object"}`): Used for triage and analysis in deal_analyzer and paper_analyzer. **Incompatible with `reasoning_effort` on this model** — do not add `extra_body` with reasoning params when using JSON mode.
 - **Tool use**: Used in `writer.py` (`write_idea_note` tool) and `deal_analyzer.py` (`calculate` tool). `reasoning_effort` works with tool use via `extra_body`.
 - **reasoning_effort**: Applied to `writer.py` calls only (`"medium"` for FB/YT, `"high"` for Arxiv).
+- **Groq tool call messages**: When re-sending assistant messages with tool calls back to Groq, you **must** construct a clean dict with only `role`, `content`, and `tool_calls` fields. The OpenAI SDK's `msg.model_dump()` includes extra fields (`annotations`, `audio`, etc.) that Groq rejects with 400 errors.
 
 ## Deployment
 
