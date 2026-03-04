@@ -1,8 +1,8 @@
 """LLM-powered paper analysis: relevance classification & key-point extraction.
 
-Given a batch of Arxiv papers, the LLM evaluates relevance against the
-user's research interests and extracts structured key points for relevant ones.
-Uses Groq API (OpenAI-compatible) for fast inference.
+Phase 1 (Triage): Groq (fast, cheap) — classifies relevance from abstract only.
+Phase 2 (Analysis): Gemini (deep, large context) — full paper text analysis
+including APA 7 thesis paragraph generation.
 """
 
 from __future__ import annotations
@@ -33,10 +33,11 @@ class TriageResponse(BaseModel):
 
 class AnalysisItem(BaseModel):
     arxiv_id: str
-    summary: str = Field(default="", description="2-3 sentence summary in Spanish")
+    summary: str = Field(default="", description="3-5 sentence summary in Spanish")
     conclusions: str = Field(default="", description="Bullet points separated by newlines")
     contributions: str = Field(default="", description="Bullet points separated by newlines")
-    key_takeaways: str = Field(default="", description="2-3 actionable bullet points")
+    key_takeaways: str = Field(default="", description="3-5 actionable bullet points")
+    thesis_paragraph: str = Field(default="", description="APA 7 thesis background paragraph in Spanish")
 
 
 class AnalysisResponse(BaseModel):
@@ -65,42 +66,74 @@ Example: {{"papers": [{{"arxiv_id": "2503.00001", "relevance": "high"}}]}}"""
 
 # ── Phase 2: full analysis ───────────────────────────────────────────────────
 
-_ANALYSIS_SYSTEM = f"""Analyze each paper. Return a JSON object with a "papers" key containing an array.
-Each element must have:
-- arxiv_id: string
-- summary: 2-3 sentences (Spanish)
-- conclusions: bullet points (Spanish, separated by \\n)
-- contributions: bullet points (Spanish, separated by \\n)
-- key_takeaways: 2-3 actionable bullet points (Spanish, separated by \\n)
+_ANALYSIS_SYSTEM = f"""Eres un investigador experto en IA y un académico riguroso. Analiza cada paper EN PROFUNDIDAD basándote en su texto completo.
 
-Use [[wiki-links]] for key concepts, **bold** for important terms.
-Example: {{"papers": [{{"arxiv_id": "...", "summary": "...", "conclusions": "...", "contributions": "...", "key_takeaways": "..."}}]}}
-Write in Spanish.
+Devuelve un JSON con clave "papers" conteniendo un array. Cada elemento debe tener:
+
+1. **arxiv_id**: string (el ID del paper)
+2. **summary**: 3-5 oraciones cubriendo la contribución central, metodología y resultados principales (en español)
+3. **conclusions**: bullet points de los hallazgos y resultados principales (en español, separados por \\n)
+4. **contributions**: bullet points de las contribuciones novedosas al campo (en español, separados por \\n)
+5. **key_takeaways**: 3-5 insights accionables o implicaciones prácticas (en español, separados por \\n)
+6. **thesis_paragraph**: Un párrafo académico completo para usar como ANTECEDENTE en una tesis, en formato APA 7. Este párrafo DEBE seguir EXACTAMENTE esta estructura:
+
+   a) CITACIÓN Y PRESENTACIÓN: "[Apellido(s)] et al. (año) presentan [NOMBRE DEL FRAMEWORK/HERRAMIENTA/MÉTODO], [descripción breve], su objetivo es [objetivo principal del estudio]."
+   b) METODOLOGÍA: "Metodológicamente, el estudio corresponde a una investigación de tipo [aplicada/básica/mixta], con un diseño [experimental/pre-experimental/cuasi-experimental/no experimental], de nivel [descriptivo/explicativo/correlacional/descriptivo-comparativo], la técnica de recolección de datos empleada es [técnica], realizada mediante [descripción del método]; como instrumentos de medición, se utilizan [instrumentos específicos que registran métricas como X, Y, Z]."
+   c) RESULTADOS: "Los resultados muestran que [resumen de hallazgos principales con datos específicos cuando estén disponibles]."
+   d) CONCLUSIÓN: "En conclusión, los autores sostienen que [conclusiones principales]."
+   e) APRECIACIÓN CRÍTICA: "Como apreciación crítica, el principal aporte del estudio es [evaluación del aporte, validez, limitaciones o implicaciones]."
+
+   IMPORTANTE para thesis_paragraph:
+   - Debe ser UN SOLO PÁRRAFO largo y continuo (no usar bullets ni saltos de línea)
+   - Usar citación APA 7: si hay 1-2 autores usar apellidos, si hay 3+ usar "et al."
+   - Inferir el tipo de investigación, diseño y nivel metodológico del contenido del paper
+   - Incluir métricas y datos numéricos específicos cuando el paper los reporte
+   - Escribir en español académico formal
+   - El año debe extraerse de la fecha de publicación del paper
+
+Usa [[wiki-links]] para conceptos clave, **negrita** para términos importantes.
+Ejemplo de formato JSON:
+{{"papers": [{{"arxiv_id": "2503.00001", "summary": "...", "conclusions": "...", "contributions": "...", "key_takeaways": "...", "thesis_paragraph": "..."}}]}}
+
+Escribe TODO en español.
 
 {OBSIDIAN_FORMATTING_SKILL}"""
 
 _ABSTRACT_LIMIT = 300
+_FULL_TEXT_LIMIT = 100000  # ~100K chars — Gemini has large context window
 _TRIAGE_BATCH = 20
-_ANALYSIS_BATCH = 8
+_ANALYSIS_BATCH = 1  # One paper at a time for deep Gemini analysis
 
 
 async def analyze_papers(
     papers: list[dict[str, Any]], settings: Settings
 ) -> list[dict[str, Any]]:
-    """Two-phase analysis: cheap triage → full analysis on relevant only."""
+    """Two-phase analysis: Groq triage (fast) → Gemini deep analysis (full text)."""
     if not papers:
         return []
 
-    client = openai.AsyncOpenAI(
+    # Groq client for fast triage
+    groq_client = openai.AsyncOpenAI(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
     )
 
-    # ── Phase 1: Triage ───────────────────────────────────────
+    # Gemini client for deep analysis (OpenAI-compatible endpoint)
+    gemini_client: openai.AsyncOpenAI | None = None
+    if settings.gemini_api_key:
+        gemini_client = openai.AsyncOpenAI(
+            api_key=settings.gemini_api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+        logger.info("Using Gemini ({}) for deep paper analysis", settings.gemini_model)
+    else:
+        logger.warning("No GEMINI_API_KEY set — falling back to Groq for analysis")
+
+    # ── Phase 1: Triage (Groq — fast, abstract only) ─────────
     relevance_map: dict[str, str] = {}
     for i in range(0, len(papers), _TRIAGE_BATCH):
         batch = papers[i : i + _TRIAGE_BATCH]
-        triage = await _triage_batch(batch, client, settings)
+        triage = await _triage_batch(batch, groq_client, settings)
         for t in triage:
             relevance_map[t["arxiv_id"]] = t.get("relevance", "low")
 
@@ -120,11 +153,14 @@ async def analyze_papers(
     if not relevant_papers:
         return []
 
-    # ── Phase 2: Full analysis ────────────────────────────────
+    # ── Phase 2: Deep analysis (Gemini — full text) ───────────
+    analysis_client = gemini_client or groq_client
+    analysis_model = settings.gemini_model if gemini_client else settings.llm_model
+
     all_analyses: dict[str, dict[str, Any]] = {}
     for i in range(0, len(relevant_papers), _ANALYSIS_BATCH):
         batch = relevant_papers[i : i + _ANALYSIS_BATCH]
-        analyses = await _analysis_batch(batch, client, settings)
+        analyses = await _analysis_batch(batch, analysis_client, analysis_model, settings)
         for a in analyses:
             all_analyses[a["arxiv_id"]] = a
 
@@ -152,6 +188,32 @@ def _paper_snippet(p: dict[str, Any], abstract_limit: int = _ABSTRACT_LIMIT) -> 
     abstract = (p.get("abstract", "") or "")[:abstract_limit]
     cats = ",".join(p.get("categories", []))
     return f"{p.get('arxiv_id','')}: [{cats}] {p.get('title','')}. {abstract}"
+
+
+def _paper_full_text_snippet(p: dict[str, Any]) -> str:
+    """Build a rich snippet with full paper text for deep analysis."""
+    full_text = (p.get("full_text", "") or "").strip()
+    abstract = (p.get("abstract", "") or "").strip()
+    cats = ",".join(p.get("categories", []))
+
+    if full_text:
+        # Use full text, truncated to limit
+        content = full_text[:_FULL_TEXT_LIMIT]
+        source_label = f"[FULL TEXT — {len(full_text):,} chars, showing first {len(content):,}]"
+    else:
+        # Fallback to abstract if PDF extraction failed
+        content = abstract
+        source_label = "[ABSTRACT ONLY — PDF not available]"
+
+    return (
+        f"---\n"
+        f"arxiv_id: {p.get('arxiv_id', '')}\n"
+        f"title: {p.get('title', '')}\n"
+        f"categories: {cats}\n"
+        f"{source_label}\n\n"
+        f"{content}\n"
+        f"---"
+    )
 
 
 def _parse_triage(content: str) -> list[TriageItem]:
@@ -211,33 +273,43 @@ async def _triage_batch(
 async def _analysis_batch(
     papers: list[dict[str, Any]],
     client: openai.AsyncOpenAI,
+    model: str,
     settings: Settings,
 ) -> list[dict[str, Any]]:
     papers_text = "\n\n".join(
-        f"---\narxiv_id: {p.get('arxiv_id', '')}\n"
-        f"title: {p.get('title', '')}\n"
-        f"abstract: {(p.get('abstract', '') or '')[:500]}\n---"
-        for p in papers
+        _paper_full_text_snippet(p) for p in papers
     )
     try:
+        logger.info(
+            "Analyzing {} paper(s) with {} ({:.0f}K chars input)",
+            len(papers), model, len(papers_text) / 1000,
+        )
         response = await client.chat.completions.create(
-            model=settings.llm_model,
+            model=model,
             messages=[
                 {"role": "system", "content": _ANALYSIS_SYSTEM},
-                {"role": "user", "content": f"Analyze:\n{papers_text}"},
+                {"role": "user", "content": f"Analiza estos papers en profundidad basándote en su texto completo:\n{papers_text}"},
             ],
-            max_tokens=4096,
+            max_tokens=8192,
             response_format={"type": "json_object"},
         )
         items = _parse_analysis(response.choices[0].message.content or '{"papers":[]}')
         return [item.model_dump() for item in items]
     except (json.JSONDecodeError, ValueError) as exc:
         logger.warning("Analysis parse/validation failed: {}", exc)
-        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
-                 "summary": "", "conclusions": "",
-                 "contributions": "", "key_takeaways": ""} for p in papers]
+        return [_empty_analysis(p) for p in papers]
     except Exception as exc:
         logger.error("Analysis LLM call failed: {}", exc)
-        return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low",
-                 "summary": "", "conclusions": "",
-                 "contributions": "", "key_takeaways": ""} for p in papers]
+        return [_empty_analysis(p) for p in papers]
+
+
+def _empty_analysis(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "arxiv_id": p.get("arxiv_id", ""),
+        "relevance": "low",
+        "summary": "",
+        "conclusions": "",
+        "contributions": "",
+        "key_takeaways": "",
+        "thesis_paragraph": "",
+    }

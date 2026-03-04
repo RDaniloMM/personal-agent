@@ -85,6 +85,7 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
     conclusions = paper.get("conclusions", "")
     contributions = paper.get("contributions", "")
     key_takeaways = paper.get("key_takeaways", "")
+    thesis_paragraph = paper.get("thesis_paragraph", "")
 
     body = f"""{fm}
 
@@ -107,6 +108,10 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
 ## Puntos importantes
 
 {key_takeaways if key_takeaways else '> _Sin análisis_'}
+
+## Antecedente para Tesis (APA 7)
+
+{thesis_paragraph if thesis_paragraph else '> _Sin párrafo de antecedente generado_'}
 
 ## Notas
 
