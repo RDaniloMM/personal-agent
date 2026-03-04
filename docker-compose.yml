@@ -43,7 +43,7 @@ services:
       - uv-cache-yt:/root/.cache/uv
     command: ["uv", "run", "python", "-m", "yt_worker.main"]
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "yt_worker.main"]
+      test: ["CMD", "test", "-d", "/proc/1"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -79,7 +79,7 @@ services:
       - uv-cache-arxiv:/root/.cache/uv
     command: ["uv", "run", "python", "-m", "arxiv_worker.main"]
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "arxiv_worker.main"]
+      test: ["CMD", "test", "-d", "/proc/1"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -116,7 +116,7 @@ services:
       - uv-cache-fb:/root/.cache/uv
     command: ["uv", "run", "python", "-m", "fb_worker.main"]
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "fb_worker.main"]
+      test: ["CMD", "test", "-d", "/proc/1"]
       interval: 60s
       timeout: 10s
       retries: 3
