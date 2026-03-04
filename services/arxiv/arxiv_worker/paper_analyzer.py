@@ -12,6 +12,8 @@ import json
 from typing import Any, Literal
 
 import openai
+from google import genai
+from google.genai import types
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -100,7 +102,6 @@ Escribe TODO en español.
 {OBSIDIAN_FORMATTING_SKILL}"""
 
 _ABSTRACT_LIMIT = 300
-_FULL_TEXT_LIMIT = 100000  # ~100K chars — Gemini has large context window
 _TRIAGE_BATCH = 20
 _ANALYSIS_BATCH = 1  # One paper at a time for deep Gemini analysis
 
@@ -118,14 +119,11 @@ async def analyze_papers(
         base_url=settings.llm_base_url,
     )
 
-    # Gemini client for deep analysis (OpenAI-compatible endpoint)
-    gemini_client: openai.AsyncOpenAI | None = None
+    # Gemini client for deep analysis (native SDK — sends PDF bytes directly)
+    gemini_native: genai.Client | None = None
     if settings.gemini_api_key:
-        gemini_client = openai.AsyncOpenAI(
-            api_key=settings.gemini_api_key,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        )
-        logger.info("Using Gemini ({}) for deep paper analysis", settings.gemini_model)
+        gemini_native = genai.Client(api_key=settings.gemini_api_key)
+        logger.info("Using Gemini ({}) with native PDF vision", settings.gemini_model)
     else:
         logger.warning("No GEMINI_API_KEY set — falling back to Groq for analysis")
 
@@ -153,14 +151,14 @@ async def analyze_papers(
     if not relevant_papers:
         return []
 
-    # ── Phase 2: Deep analysis (Gemini — full text) ───────────
-    analysis_client = gemini_client or groq_client
-    analysis_model = settings.gemini_model if gemini_client else settings.llm_model
-
+    # ── Phase 2: Deep analysis (Gemini native PDF or Groq fallback) ──
     all_analyses: dict[str, dict[str, Any]] = {}
     for i in range(0, len(relevant_papers), _ANALYSIS_BATCH):
         batch = relevant_papers[i : i + _ANALYSIS_BATCH]
-        analyses = await _analysis_batch(batch, analysis_client, analysis_model, settings)
+        if gemini_native:
+            analyses = await _analysis_batch_gemini(batch, gemini_native, settings)
+        else:
+            analyses = await _analysis_batch_groq(batch, groq_client, settings)
         for a in analyses:
             all_analyses[a["arxiv_id"]] = a
 
@@ -190,29 +188,14 @@ def _paper_snippet(p: dict[str, Any], abstract_limit: int = _ABSTRACT_LIMIT) -> 
     return f"{p.get('arxiv_id','')}: [{cats}] {p.get('title','')}. {abstract}"
 
 
-def _paper_full_text_snippet(p: dict[str, Any]) -> str:
-    """Build a rich snippet with full paper text for deep analysis."""
-    full_text = (p.get("full_text", "") or "").strip()
-    abstract = (p.get("abstract", "") or "").strip()
+def _paper_metadata_header(p: dict[str, Any]) -> str:
+    """Build a metadata header for a paper (used in prompts)."""
     cats = ",".join(p.get("categories", []))
-
-    if full_text:
-        # Use full text, truncated to limit
-        content = full_text[:_FULL_TEXT_LIMIT]
-        source_label = f"[FULL TEXT — {len(full_text):,} chars, showing first {len(content):,}]"
-    else:
-        # Fallback to abstract if PDF extraction failed
-        content = abstract
-        source_label = "[ABSTRACT ONLY — PDF not available]"
-
     return (
-        f"---\n"
         f"arxiv_id: {p.get('arxiv_id', '')}\n"
         f"title: {p.get('title', '')}\n"
         f"categories: {cats}\n"
-        f"{source_label}\n\n"
-        f"{content}\n"
-        f"---"
+        f"published: {p.get('published', '')}"
     )
 
 
@@ -270,25 +253,79 @@ async def _triage_batch(
     return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
 
 
-async def _analysis_batch(
+async def _analysis_batch_gemini(
     papers: list[dict[str, Any]],
-    client: openai.AsyncOpenAI,
-    model: str,
+    client: genai.Client,
     settings: Settings,
 ) -> list[dict[str, Any]]:
+    """Analyze papers using Gemini native SDK — sends raw PDF bytes."""
+    results: list[dict[str, Any]] = []
+
+    for paper in papers:
+        pdf_bytes: bytes = paper.get("pdf_bytes", b"") or b""
+        header = _paper_metadata_header(paper)
+
+        # Build content parts
+        parts: list[Any] = []
+        if pdf_bytes:
+            parts.append(types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"))
+            source = f"PDF ({len(pdf_bytes) / (1024*1024):.1f}MB)"
+        else:
+            # Fallback: send abstract as text
+            parts.append(paper.get("abstract", ""))
+            source = "abstract only"
+
+        parts.append(
+            f"Metadatos del paper:\n{header}\n\n"
+            f"Analiza este paper en profundidad basándote en el documento completo."
+        )
+
+        try:
+            logger.info(
+                "Analyzing [{}] with Gemini native PDF vision ({})",
+                paper.get("arxiv_id", ""), source,
+            )
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=settings.gemini_model,
+                contents=[_ANALYSIS_SYSTEM] + parts,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=8192,
+                ),
+            )
+            items = _parse_analysis(response.text or '{"papers":[]}')
+            results.extend(item.model_dump() for item in items)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Gemini analysis parse failed for {}: {}", paper.get("arxiv_id"), exc)
+            results.append(_empty_analysis(paper))
+        except Exception as exc:
+            logger.error("Gemini analysis call failed for {}: {}", paper.get("arxiv_id"), exc)
+            results.append(_empty_analysis(paper))
+
+    return results
+
+
+async def _analysis_batch_groq(
+    papers: list[dict[str, Any]],
+    client: openai.AsyncOpenAI,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    """Fallback: analyze papers using Groq with abstract text only."""
     papers_text = "\n\n".join(
-        _paper_full_text_snippet(p) for p in papers
+        f"---\n{_paper_metadata_header(p)}\n\n{p.get('abstract', '')}\n---"
+        for p in papers
     )
     try:
         logger.info(
-            "Analyzing {} paper(s) with {} ({:.0f}K chars input)",
-            len(papers), model, len(papers_text) / 1000,
+            "Analyzing {} paper(s) with Groq fallback ({:.0f}K chars)",
+            len(papers), len(papers_text) / 1000,
         )
         response = await client.chat.completions.create(
-            model=model,
+            model=settings.llm_model,
             messages=[
                 {"role": "system", "content": _ANALYSIS_SYSTEM},
-                {"role": "user", "content": f"Analiza estos papers en profundidad basándote en su texto completo:\n{papers_text}"},
+                {"role": "user", "content": f"Analiza estos papers:\n{papers_text}"},
             ],
             max_tokens=8192,
             response_format={"type": "json_object"},

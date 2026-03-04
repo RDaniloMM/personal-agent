@@ -1,19 +1,15 @@
 """Arxiv paper collector using the arxiv.py library (free, no API key).
 
-Downloads PDFs and extracts full text via PyMuPDF for deep analysis.
+Downloads PDFs as raw bytes for native Gemini vision analysis.
 """
 
 from __future__ import annotations
 
-import tempfile
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any
 
 import arxiv
-import fitz  # PyMuPDF
 import httpx
-import pymupdf4llm
 from loguru import logger
 
 from shared.config import Settings
@@ -81,8 +77,8 @@ async def collect_arxiv_papers(settings: Settings) -> list[dict[str, Any]]:
         len(ARXIV_QUERIES),
     )
 
-    # Download PDFs and extract full text
-    await _enrich_with_full_text(papers_list)
+    # Download PDFs (raw bytes for Gemini native vision)
+    await _download_pdfs(papers_list)
 
     return papers_list
 
@@ -112,28 +108,17 @@ async def _download_pdf(url: str) -> bytes | None:
         return None
 
 
-def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes as clean Markdown using pymupdf4llm."""
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        md_text = pymupdf4llm.to_markdown(doc)
-        doc.close()
-        # Clean up excessive whitespace
-        lines = [line.rstrip() for line in md_text.splitlines()]
-        return "\n".join(lines)
-    except Exception as exc:
-        logger.warning("PDF markdown extraction failed: {}", exc)
-        return ""
+async def _download_pdfs(papers: list[dict[str, Any]]) -> None:
+    """Download PDFs and store raw bytes in each paper dict.
 
-
-async def _enrich_with_full_text(papers: list[dict[str, Any]]) -> None:
-    """Download PDFs and add 'full_text' to each paper dict."""
+    The raw PDF bytes are sent directly to Gemini's native document
+    vision API — no local text extraction needed.
+    """
     import asyncio
 
     total = len(papers)
     success = 0
 
-    # Process in batches of 5 to avoid overwhelming the server
     batch_size = 5
     for i in range(0, total, batch_size):
         batch = papers[i : i + batch_size]
@@ -142,19 +127,17 @@ async def _enrich_with_full_text(papers: list[dict[str, Any]]) -> None:
 
         for paper, pdf_bytes in zip(batch, results):
             if pdf_bytes:
-                text = _extract_text_from_pdf(pdf_bytes)
-                paper["full_text"] = text
-                if text:
-                    success += 1
-                    logger.debug(
-                        "Extracted {:.0f}K chars from {}",
-                        len(text) / 1000,
-                        paper.get("arxiv_id", ""),
-                    )
+                paper["pdf_bytes"] = pdf_bytes
+                success += 1
+                logger.debug(
+                    "Downloaded PDF {:.1f}MB for {}",
+                    len(pdf_bytes) / (1024 * 1024),
+                    paper.get("arxiv_id", ""),
+                )
             else:
-                paper["full_text"] = ""
+                paper["pdf_bytes"] = b""
 
     logger.info(
-        "PDF extraction: {}/{} papers with full text",
+        "PDF download: {}/{} papers ready for Gemini",
         success, total,
     )

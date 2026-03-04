@@ -7,8 +7,7 @@ dependencies = [
     "shared",
     "arxiv>=2.4.1",
     "apscheduler>=3.11.2,<4",
-    "pymupdf>=1.27.1",
-    "pymupdf4llm>=0.3.4",
+    "google-genai>=1.65",
     "httpx>=0.28.1",
 ]
 

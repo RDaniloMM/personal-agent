@@ -39,7 +39,7 @@ async def _run_e2e() -> None:
     # ── Phase 1: Fetch specific paper by ID ─────────────────────────
     import arxiv as arxiv_lib
 
-    from arxiv_worker.client import _enrich_with_full_text
+    from arxiv_worker.client import _download_pdfs
     from shared.state import ArxivPaper
 
     client = arxiv_lib.Client()
@@ -76,20 +76,18 @@ async def _run_e2e() -> None:
     for key in ("arxiv_id", "title", "abstract", "authors", "pdf_url"):
         assert key in papers[0], f"Missing '{key}' in paper"
 
-    # ── Phase 1b: PDF download + full text extraction ───────────────
-    await _enrich_with_full_text(papers)
+    # ── Phase 1b: PDF download (raw bytes for Gemini) ───────────────
+    await _download_pdfs(papers)
 
-    full_text = papers[0].get("full_text", "")
-    if full_text:
-        logger.info("✓ Full text extracted: {:.0f}K chars (Markdown)", len(full_text) / 1000)
-        # Show first 200 chars to verify Markdown conversion
-        logger.debug("  Preview: {}", full_text[:200].replace("\n", " "))
+    pdf_bytes = papers[0].get("pdf_bytes", b"")
+    if pdf_bytes:
+        logger.info("✓ PDF downloaded: {:.1f}MB", len(pdf_bytes) / (1024 * 1024))
     else:
-        logger.warning("⚠ No full text extracted — PDF download or conversion failed")
+        logger.warning("⚠ No PDF downloaded")
 
-    assert full_text, "Expected full_text from PDF extraction"
+    assert pdf_bytes, "Expected pdf_bytes from PDF download"
 
-    # ── Phase 2: LLM analysis (triage + full) ──────────────────────
+    # ── Phase 2: LLM analysis (triage + Gemini native PDF) ─────────
     from arxiv_worker.paper_analyzer import analyze_papers
 
     analyzed = await analyze_papers(papers, settings)
@@ -129,6 +127,43 @@ async def _run_e2e() -> None:
             paper["title"][:40],
             paper["relevance"],
         )
+
+    # ── Phase 3: Write Obsidian note to vault/Agent-Research/Tests/ ──
+    import re
+    from pathlib import Path
+
+    tests_subfolder = settings.obsidian_subfolder("Tests")
+    papers_folder = settings.obsidian_subfolder("Papers")
+
+    from shared.storage.obsidian import write_arxiv_paper
+
+    for paper in analyzed:
+        # Compute the exact filename write_arxiv_paper will use
+        title = paper.get("title", "paper")
+        clean = re.sub(r'[<>:"/\\|?*\n\r]', "", title).strip(". ")[:80]
+        expected_file = papers_folder / (clean + ".md")
+
+        # Delete existing note so write_arxiv_paper generates a fresh one
+        if expected_file.exists():
+            logger.debug("Removing existing note: {}", expected_file.name)
+            expected_file.unlink()
+
+        # Generate fresh note into Papers/
+        note_path = Path(write_arxiv_paper(paper, settings))
+
+        if not note_path.exists():
+            logger.warning("Note was not generated: {}", note_path)
+            continue
+
+        # Copy to Tests/ subfolder (separate from production notes)
+        dest = tests_subfolder / note_path.name
+        note_content = note_path.read_text(encoding="utf-8")
+        dest.write_text(note_content, encoding="utf-8")
+        logger.info("Copied test note to: {}", dest)
+
+        # Display the full note content in logs
+        logger.info("\n{}\nGENERATED NOTE: {}\n{}\n{}\n{}",
+            "═" * 80, dest.name, "═" * 80, note_content, "═" * 80)
 
     logger.info("═══ E2E ARXIV TEST PASSED ═══")
 
