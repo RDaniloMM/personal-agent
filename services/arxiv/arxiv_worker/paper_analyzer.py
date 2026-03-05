@@ -8,7 +8,9 @@ including APA 7 thesis paragraph generation.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import time
 from typing import Any, Literal
 
 import openai
@@ -239,6 +241,16 @@ async def _triage_batch(
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Triage parse/validation failed (attempt {}): {}", attempt + 1, exc)
             last_exc = exc
+        except openai.RateLimitError as exc:
+            wait = 15 * (attempt + 1)  # 15s, 30s … deja pasar la ventana TPM
+            logger.warning(
+                "Groq rate limit hit (attempt {}), waiting {}s: {}",
+                attempt + 1, wait, exc,
+            )
+            last_exc = exc
+            if attempt < _retries:
+                await asyncio.sleep(wait)
+            continue
         except openai.BadRequestError as exc:
             logger.warning("Triage JSON generation failed (attempt {}): {}", attempt + 1, exc)
             last_exc = exc
@@ -253,55 +265,142 @@ async def _triage_batch(
     return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
 
 
+_GEMINI_RETRIES = 2
+_INLINE_PDF_MB = 10  # PDFs más grandes se suben via Files API
+
+
+def _upload_pdf_blocking(
+    client: genai.Client,
+    pdf_bytes: bytes,
+    arxiv_id: str,
+) -> Any:
+    """Sube un PDF a la Files API de Gemini y espera a que esté ACTIVE.
+
+    Retorna el objeto File o None si falla.
+    Debe llamarse desde asyncio.to_thread.
+    """
+    try:
+        uploaded = client.files.upload(
+            file=io.BytesIO(pdf_bytes),
+            config={"mime_type": "application/pdf", "display_name": arxiv_id},
+        )
+        # Esperar hasta que el archivo esté ACTIVE (normalmente <5s)
+        deadline = time.time() + 60
+        while uploaded.state.name != "ACTIVE":
+            if time.time() > deadline:
+                logger.warning("Files API: timeout waiting for {} to be ACTIVE", arxiv_id)
+                return None
+            time.sleep(2)
+            uploaded = client.files.get(name=uploaded.name)
+        return uploaded
+    except Exception as exc:
+        logger.error("Files API upload failed for {}: {}", arxiv_id, exc)
+        return None
+
+
+def _delete_file_blocking(client: genai.Client, file_name: str) -> None:
+    """Elimina un archivo de la Files API (llamar desde to_thread)."""
+    try:
+        client.files.delete(name=file_name)
+    except Exception as exc:
+        logger.warning("Files API delete failed for {}: {}", file_name, exc)
+
+
 async def _analysis_batch_gemini(
     papers: list[dict[str, Any]],
     client: genai.Client,
     settings: Settings,
 ) -> list[dict[str, Any]]:
-    """Analyze papers using Gemini native SDK — sends raw PDF bytes."""
+    """Analyze papers using Gemini native SDK.
+
+    - PDF ≤ 10MB → inline (from_bytes)
+    - PDF >  10MB → Files API upload → URI reference → delete after
+    - Sin PDF      → solo abstract como texto
+    """
     results: list[dict[str, Any]] = []
 
     for paper in papers:
         pdf_bytes: bytes = paper.get("pdf_bytes", b"") or b""
         header = _paper_metadata_header(paper)
+        arxiv_id = paper.get("arxiv_id", "")
+        size_mb = len(pdf_bytes) / (1024 * 1024)
 
-        # Build content parts
-        parts: list[Any] = []
-        if pdf_bytes:
-            parts.append(types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"))
-            source = f"PDF ({len(pdf_bytes) / (1024*1024):.1f}MB)"
-        else:
-            # Fallback: send abstract as text
-            parts.append(paper.get("abstract", ""))
+        # ── Construir la parte PDF del prompt ────────────────────────────────
+        uploaded_file_name: str | None = None  # para borrar después
+
+        if not pdf_bytes:
+            pdf_part: Any = paper.get("abstract", "")
             source = "abstract only"
-
-        parts.append(
-            f"Metadatos del paper:\n{header}\n\n"
-            f"Analiza este paper en profundidad basándote en el documento completo."
-        )
-
-        try:
+        elif size_mb <= _INLINE_PDF_MB:
+            pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+            source = f"PDF inline ({size_mb:.1f}MB)"
+        else:
+            # PDF grande → Files API
             logger.info(
-                "Analyzing [{}] with Gemini native PDF vision ({})",
-                paper.get("arxiv_id", ""), source,
+                "PDF large ({:.1f}MB) for [{}] — uploading via Files API",
+                size_mb, arxiv_id,
             )
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=settings.gemini_model,
-                contents=[_ANALYSIS_SYSTEM] + parts,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    max_output_tokens=8192,
-                ),
+            uploaded = await asyncio.to_thread(
+                _upload_pdf_blocking, client, pdf_bytes, arxiv_id
             )
-            items = _parse_analysis(response.text or '{"papers":[]}')
-            results.extend(item.model_dump() for item in items)
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Gemini analysis parse failed for {}: {}", paper.get("arxiv_id"), exc)
-            results.append(_empty_analysis(paper))
-        except Exception as exc:
-            logger.error("Gemini analysis call failed for {}: {}", paper.get("arxiv_id"), exc)
-            results.append(_empty_analysis(paper))
+            if uploaded:
+                pdf_part = types.Part.from_uri(
+                    file_uri=uploaded.uri, mime_type="application/pdf"
+                )
+                uploaded_file_name = uploaded.name
+                source = f"PDF Files API ({size_mb:.1f}MB)"
+                logger.info("Files API upload ready: {} → {}", arxiv_id, uploaded.uri)
+            else:
+                # Fallback a abstract si la subida falla
+                pdf_part = paper.get("abstract", "")
+                source = "abstract only (upload failed)"
+
+        parts: list[Any] = [
+            pdf_part,
+            f"Metadatos del paper:\n{header}\n\n"
+            f"Analiza este paper en profundidad basándote en el documento completo.",
+        ]
+
+        # ── Intentos de análisis ──────────────────────────────────────────────
+        result: dict[str, Any] | None = None
+        for attempt in range(_GEMINI_RETRIES + 1):
+            try:
+                logger.info(
+                    "Analyzing [{}] with Gemini ({}) attempt {}/{}",
+                    arxiv_id, source, attempt + 1, _GEMINI_RETRIES + 1,
+                )
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=settings.gemini_model,
+                    contents=[_ANALYSIS_SYSTEM] + parts,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        max_output_tokens=16384,
+                    ),
+                )
+                items = _parse_analysis(response.text or '{"papers":[]}')
+                result = next(
+                    (item.model_dump() for item in items if item.arxiv_id == arxiv_id),
+                    items[0].model_dump() if items else None,
+                )
+                break  # éxito
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning(
+                    "Gemini parse failed for {} (attempt {}/{}): {}",
+                    arxiv_id, attempt + 1, _GEMINI_RETRIES + 1, exc,
+                )
+                if attempt < _GEMINI_RETRIES:
+                    await asyncio.sleep(3 * (attempt + 1))
+            except Exception as exc:
+                logger.error("Gemini call failed for {}: {}", arxiv_id, exc)
+                break  # error no recuperable
+
+        # ── Limpiar archivo de Files API si se usó ────────────────────────
+        if uploaded_file_name:
+            await asyncio.to_thread(_delete_file_blocking, client, uploaded_file_name)
+            logger.debug("Files API: deleted {}", uploaded_file_name)
+
+        results.append(result if result is not None else _empty_analysis(paper))
 
     return results
 

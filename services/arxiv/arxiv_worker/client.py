@@ -85,8 +85,8 @@ async def collect_arxiv_papers(settings: Settings) -> list[dict[str, Any]]:
 
 # ── PDF download & text extraction ──────────────────────────────────────────
 
-_MAX_PDF_SIZE_MB = 15
-_PDF_DOWNLOAD_TIMEOUT = 60
+_MAX_PDF_SIZE_MB = 50  # PDFs grandes van via Files API en el analyzer
+_PDF_DOWNLOAD_TIMEOUT = 120
 
 
 async def _download_pdf(url: str) -> bytes | None:
