@@ -10,6 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgbm1 libasound2 libxshmfence1 \
     && rm -rf /var/lib/apt/lists/*
 
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # 1. Shared package (highly cacheable layer)
@@ -33,7 +38,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev
 
 RUN mkdir -p /app/profiles /app/logs /app/vault
-
-ENV PYTHONUNBUFFERED=1
 
 CMD ["uv", "run", "python", "-m", "fb_worker.main"]
