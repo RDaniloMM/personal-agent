@@ -20,7 +20,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from shared.config import Settings
-from shared.prompts.obsidian_skill import OBSIDIAN_FORMATTING_SKILL
+from shared.llm_json import extract_json_payload
 
 
 # ── Pydantic models for structured LLM output ────────────────────────────────
@@ -66,7 +66,8 @@ _TRIAGE_SYSTEM = f"""Score each paper's relevance to these interests:
 
 Return a JSON object with a "papers" key containing an array.
 Each element: {{"arxiv_id":"...","relevance":"high"|"medium"|"low"}}
-Example: {{"papers": [{{"arxiv_id": "2503.00001", "relevance": "high"}}]}}"""
+Example: {{"papers": [{{"arxiv_id": "2503.00001", "relevance": "high"}}]}}
+No incluyas texto fuera del JSON ni bloques markdown."""
 
 # ── Phase 2: full analysis ───────────────────────────────────────────────────
 
@@ -95,13 +96,11 @@ Devuelve un JSON con clave "papers" conteniendo un array. Cada elemento debe ten
    - Escribir en español académico formal
    - El año debe extraerse de la fecha de publicación del paper
 
-Usa [[wiki-links]] para conceptos clave, **negrita** para términos importantes.
+Usa texto plano dentro de los campos string.
 Ejemplo de formato JSON:
 {{"papers": [{{"arxiv_id": "2503.00001", "summary": "...", "conclusions": "...", "contributions": "...", "key_takeaways": "...", "thesis_paragraph": "..."}}]}}
 
-Escribe TODO en español.
-
-{OBSIDIAN_FORMATTING_SKILL}"""
+Escribe TODO en español. No incluyas texto fuera del JSON ni bloques markdown."""
 
 _ABSTRACT_LIMIT = 300
 _TRIAGE_BATCH = 20
@@ -202,17 +201,37 @@ def _paper_metadata_header(p: dict[str, Any]) -> str:
 
 
 def _parse_triage(content: str) -> list[TriageItem]:
-    data = json.loads(content)
+    data = extract_json_payload(content)
     if isinstance(data, list):
         data = {"papers": data}
     return TriageResponse.model_validate(data).papers
 
 
 def _parse_analysis(content: str) -> list[AnalysisItem]:
-    data = json.loads(content)
+    data = extract_json_payload(content)
     if isinstance(data, list):
         data = {"papers": data}
     return AnalysisResponse.model_validate(data).papers
+
+
+_JSON_ONLY_SYSTEM = (
+    "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
+)
+
+
+async def _request_json_reply(
+    client: openai.AsyncOpenAI,
+    settings: Settings,
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int,
+) -> Any:
+    response = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=[{"role": "system", "content": _JSON_ONLY_SYSTEM}, *messages],
+        max_tokens=max_tokens,
+    )
+    return extract_json_payload(response.choices[0].message.content or "{}")
 
 
 async def _triage_batch(
@@ -223,16 +242,16 @@ async def _triage_batch(
     _retries: int = 2,
 ) -> list[dict[str, Any]]:
     papers_text = "\n".join(_paper_snippet(p) for p in papers)
-    last_exc: Exception | None = None
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _TRIAGE_SYSTEM},
+        {"role": "user", "content": papers_text},
+    ]
 
     for attempt in range(_retries + 1):
         try:
             response = await client.chat.completions.create(
                 model=settings.llm_model,
-                messages=[
-                    {"role": "system", "content": _TRIAGE_SYSTEM},
-                    {"role": "user", "content": papers_text},
-                ],
+                messages=messages,
                 max_tokens=1024,
                 response_format={"type": "json_object"},
             )
@@ -240,20 +259,31 @@ async def _triage_batch(
             return [item.model_dump() for item in items]
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Triage parse/validation failed (attempt {}): {}", attempt + 1, exc)
-            last_exc = exc
         except openai.RateLimitError as exc:
-            wait = 15 * (attempt + 1)  # 15s, 30s … deja pasar la ventana TPM
+            wait = 15 * (attempt + 1)  # 15s, 30s ... deja pasar la ventana TPM
             logger.warning(
                 "Groq rate limit hit (attempt {}), waiting {}s: {}",
                 attempt + 1, wait, exc,
             )
-            last_exc = exc
             if attempt < _retries:
                 await asyncio.sleep(wait)
             continue
         except openai.BadRequestError as exc:
-            logger.warning("Triage JSON generation failed (attempt {}): {}", attempt + 1, exc)
-            last_exc = exc
+            logger.warning(
+                "Triage JSON generation failed (attempt {}), retrying without response_format: {}",
+                attempt + 1, exc,
+            )
+            try:
+                data = await _request_json_reply(client, settings, messages, max_tokens=1024)
+                if isinstance(data, list):
+                    data = {"papers": data}
+                items = TriageResponse.model_validate(data).papers
+                return [item.model_dump() for item in items]
+            except (json.JSONDecodeError, ValueError) as fallback_exc:
+                logger.warning(
+                    "Triage fallback parse failed (attempt {}): {}",
+                    attempt + 1, fallback_exc,
+                )
         except Exception as exc:
             logger.error("Triage LLM call failed: {}", exc)
             return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low"} for p in papers]
@@ -266,6 +296,7 @@ async def _triage_batch(
 
 
 _GEMINI_RETRIES = 2
+_GEMINI_REQUEST_TIMEOUT = 180
 _INLINE_PDF_MB = 10  # PDFs más grandes se suben via Files API
 
 
@@ -369,14 +400,17 @@ async def _analysis_batch_gemini(
                     "Analyzing [{}] with Gemini ({}) attempt {}/{}",
                     arxiv_id, source, attempt + 1, _GEMINI_RETRIES + 1,
                 )
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=settings.gemini_model,
-                    contents=[_ANALYSIS_SYSTEM] + parts,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        max_output_tokens=16384,
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.generate_content,
+                        model=settings.gemini_model,
+                        contents=[_ANALYSIS_SYSTEM] + parts,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            max_output_tokens=16384,
+                        ),
                     ),
+                    timeout=_GEMINI_REQUEST_TIMEOUT,
                 )
                 items = _parse_analysis(response.text or '{"papers":[]}')
                 result = next(
@@ -388,6 +422,13 @@ async def _analysis_batch_gemini(
                 logger.warning(
                     "Gemini parse failed for {} (attempt {}/{}): {}",
                     arxiv_id, attempt + 1, _GEMINI_RETRIES + 1, exc,
+                )
+                if attempt < _GEMINI_RETRIES:
+                    await asyncio.sleep(3 * (attempt + 1))
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Gemini timeout for {} after {}s (attempt {}/{} )",
+                    arxiv_id, _GEMINI_REQUEST_TIMEOUT, attempt + 1, _GEMINI_RETRIES + 1,
                 )
                 if attempt < _GEMINI_RETRIES:
                     await asyncio.sleep(3 * (attempt + 1))
@@ -415,21 +456,29 @@ async def _analysis_batch_groq(
         f"---\n{_paper_metadata_header(p)}\n\n{p.get('abstract', '')}\n---"
         for p in papers
     )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _ANALYSIS_SYSTEM},
+        {"role": "user", "content": f"Analiza estos papers:\n{papers_text}"},
+    ]
     try:
         logger.info(
             "Analyzing {} paper(s) with Groq fallback ({:.0f}K chars)",
             len(papers), len(papers_text) / 1000,
         )
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": _ANALYSIS_SYSTEM},
-                {"role": "user", "content": f"Analiza estos papers:\n{papers_text}"},
-            ],
-            max_tokens=8192,
-            response_format={"type": "json_object"},
-        )
-        items = _parse_analysis(response.choices[0].message.content or '{"papers":[]}')
+        try:
+            response = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=messages,
+                max_tokens=8192,
+                response_format={"type": "json_object"},
+            )
+            items = _parse_analysis(response.choices[0].message.content or '{"papers":[]}')
+        except openai.BadRequestError as exc:
+            logger.warning("Groq analysis JSON fallback triggered: {}", exc)
+            data = await _request_json_reply(client, settings, messages, max_tokens=8192)
+            if isinstance(data, list):
+                data = {"papers": data}
+            items = AnalysisResponse.model_validate(data).papers
         return [item.model_dump() for item in items]
     except (json.JSONDecodeError, ValueError) as exc:
         logger.warning("Analysis parse/validation failed: {}", exc)

@@ -4,16 +4,16 @@ services:
     container_name: personal-agent-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: agent
-      POSTGRES_PASSWORD: agent_secret
-      POSTGRES_DB: agent_vectors
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_vectors}
       TZ: America/Lima
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agent -d agent_vectors"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent} -d ${POSTGRES_DB:-agent_vectors}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -33,7 +33,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - OBSIDIAN_VAULT_PATH=/app/vault
-      - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
       - BROWSER_PROFILES_DIR=/app/profiles
       - TZ=America/Lima
     volumes:
@@ -70,7 +70,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - OBSIDIAN_VAULT_PATH=/app/vault
-      - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
       - BROWSER_PROFILES_DIR=/app/profiles
       - TZ=America/Lima
     volumes:
@@ -106,7 +106,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - OBSIDIAN_VAULT_PATH=/app/vault
-      - DATABASE_URL=postgresql://agent:agent_secret@db:5432/agent_vectors
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
       - BROWSER_PROFILES_DIR=/app/profiles
       - TZ=America/Lima
     volumes:

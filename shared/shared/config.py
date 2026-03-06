@@ -33,12 +33,12 @@ class Settings(BaseSettings):
     embedding_dim: int = Field(1536, description="Embedding dimension")
     # ── Gemini (paper analysis) ────────────────
     gemini_api_key: str = Field("", description="Google Gemini API key")
-    gemini_model: str = Field("gemini-3.1-pro-preview", description="Gemini model for deep paper analysis")
-    # ── PostgreSQL + pgvector ────────────────────────
-    database_url: str = Field(
-        "postgresql://agent:agent_secret@localhost:5432/agent_vectors",
-        description="PostgreSQL connection string",
+    gemini_model: str = Field(
+        "gemini-3.1-pro-preview",
+        description="Gemini model for deep paper analysis",
     )
+    # ── PostgreSQL + pgvector ────────────────────────
+    database_url: str = Field(..., description="PostgreSQL connection string")
 
     # ── Obsidian ─────────────────────────────────────
     obsidian_vault_path: Path = Field(

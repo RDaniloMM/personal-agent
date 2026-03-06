@@ -30,14 +30,14 @@ $LOCAL_BASE = Split-Path -Parent $PSScriptRoot
 # ── Upload código ────────────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "🚀 Deploy al servidor ($SERVER)" -ForegroundColor White
+Write-Host "Deploy al servidor ($SERVER)" -ForegroundColor White
 Write-Host "   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
 Write-Host ""
 
 # Subir shared/
-Write-Host "📤 Subiendo shared/..." -ForegroundColor Cyan
+Write-Host "Subiendo shared/..." -ForegroundColor Cyan
 scp -r "$LOCAL_BASE\shared\shared\*" "${SERVER}:${REMOTE_BASE}/shared/shared/" 2>&1
-Write-Host "   ✅ shared/ subido" -ForegroundColor Green
+Write-Host "   OK shared/ subido" -ForegroundColor Green
 
 # Subir services/
 $services = @("fb", "youtube", "arxiv")
@@ -46,17 +46,17 @@ foreach ($svc in $services) {
     if (Test-Path "$localSvc") {
         $workerName = Get-ChildItem -Path $localSvc -Directory | Where-Object { $_.Name -like "*_worker" } | Select-Object -First 1
         if ($workerName) {
-            Write-Host "📤 Subiendo services/$svc/$($workerName.Name)/..." -ForegroundColor Cyan
+            Write-Host "Subiendo services/$svc/$($workerName.Name)/..." -ForegroundColor Cyan
             scp -r "$localSvc\$($workerName.Name)\*" "${SERVER}:${REMOTE_BASE}/services/$svc/$($workerName.Name)/" 2>&1
-            Write-Host "   ✅ $svc subido" -ForegroundColor Green
+            Write-Host "   OK $svc subido" -ForegroundColor Green
         }
     }
 }
 
 # Subir docker-compose.yml
-Write-Host "📤 Subiendo docker-compose.yml..." -ForegroundColor Cyan
+Write-Host "Subiendo docker-compose.yml..." -ForegroundColor Cyan
 scp "$LOCAL_BASE\docker-compose.yml" "${SERVER}:${REMOTE_BASE}/" 2>&1
-Write-Host "   ✅ docker-compose.yml subido" -ForegroundColor Green
+Write-Host "   OK docker-compose.yml subido" -ForegroundColor Green
 
 # ── Rebuild Docker (opcional) ────────────────────────────────────────────────
 
@@ -73,16 +73,16 @@ if ($Workers -ne "none") {
 
     foreach ($w in $toBuild) {
         $dockerName = $workerMap[$w]
-        Write-Host "🔨 Reconstruyendo $dockerName..." -ForegroundColor Cyan
+        Write-Host "Reconstruyendo $dockerName..." -ForegroundColor Cyan
         ssh $SERVER "cd $REMOTE_BASE && docker compose build $dockerName 2>&1 | tail -5"
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "   ✅ $dockerName reconstruido" -ForegroundColor Green
+            Write-Host "   OK $dockerName reconstruido" -ForegroundColor Green
 
-            Write-Host "🔄 Reiniciando $dockerName..." -ForegroundColor Cyan
+            Write-Host "Reiniciando $dockerName..." -ForegroundColor Cyan
             ssh $SERVER "cd $REMOTE_BASE && docker compose up -d $dockerName 2>&1"
-            Write-Host "   ✅ $dockerName reiniciado" -ForegroundColor Green
+            Write-Host "   OK $dockerName reiniciado" -ForegroundColor Green
         } else {
-            Write-Host "   ❌ Error construyendo $dockerName" -ForegroundColor Red
+            Write-Host "   ERROR construyendo $dockerName" -ForegroundColor Red
         }
     }
 }
@@ -90,9 +90,9 @@ if ($Workers -ne "none") {
 # ── Status ───────────────────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "📊 Estado actual de los contenedores:" -ForegroundColor White
+Write-Host "Estado actual de los contenedores:" -ForegroundColor White
 ssh $SERVER "docker ps --format 'table {{.Names}}\t{{.Status}}' 2>&1"
 
 Write-Host ""
-Write-Host "✅ Deploy completado" -ForegroundColor Green
+Write-Host "Deploy completado" -ForegroundColor Green
 Write-Host ""

@@ -20,6 +20,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from shared.config import Settings
+from shared.llm_json import extract_json_payload
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -177,7 +178,8 @@ Sé estricto: solo marca "deal" si el precio es realmente excepcional.
 Si el precio está en MX$ (pesos mexicanos) o USD y es sospechosamente bajo, \
 marca como "skip" — probablemente es un error de moneda.
 
-Return a JSON object: {"listings": [{"index": 0, "verdict": "deal"}, ...]}"""
+Return a JSON object: {"listings": [{"index": 0, "verdict": "deal"}, ...]}
+No incluyas texto fuera del JSON ni bloques markdown."""
 
 
 _ANALYSIS_SYSTEM = """\
@@ -200,7 +202,8 @@ Criterios de una ganga REAL:
 
 Return a JSON object:
 {"listings": [{"index": 0, "estimated_market_price": "S/ 2,500", \
-"discount_pct": 60, "reason": "Laptop gamer a menos de la mitad del precio de ML..."}]}"""
+"discount_pct": 60, "reason": "Laptop gamer a menos de la mitad del precio de ML..."}]}
+No incluyas texto fuera del JSON ni bloques markdown."""
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
@@ -303,6 +306,26 @@ def _listing_snippet(listing: dict[str, Any], index: int) -> str:
     return f"[{index}] {title} — {price} (S/ {price_num:.0f}) — {location}. {desc}"
 
 
+_JSON_ONLY_SYSTEM = (
+    "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
+)
+
+
+async def _request_json_reply(
+    client: openai.AsyncOpenAI,
+    settings: Settings,
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int,
+) -> Any:
+    response = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=[{"role": "system", "content": _JSON_ONLY_SYSTEM}, *messages],
+        max_tokens=max_tokens,
+    )
+    return extract_json_payload(response.choices[0].message.content or "{}")
+
+
 # ── Phase 1: Triage ─────────────────────────────────────────────────────────
 
 
@@ -317,30 +340,44 @@ async def _triage_batch(
     items_text = "\n".join(
         _listing_snippet(item, offset + i) for i, item in enumerate(batch)
     )
-    last_exc: Exception | None = None
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _TRIAGE_SYSTEM},
+        {"role": "user", "content": items_text},
+    ]
 
     for attempt in range(_retries + 1):
         try:
             response = await client.chat.completions.create(
                 model=settings.llm_model,
-                messages=[
-                    {"role": "system", "content": _TRIAGE_SYSTEM},
-                    {"role": "user", "content": items_text},
-                ],
+                messages=messages,
                 max_tokens=1024,
                 response_format={"type": "json_object"},
             )
-            data = json.loads(response.choices[0].message.content or '{"listings":[]}')
+            data = extract_json_payload(response.choices[0].message.content or '{"listings":[]}')
             if isinstance(data, list):
                 data = {"listings": data}
             items = DealTriageResponse.model_validate(data).listings
             return [item.model_dump() for item in items]
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Deal triage parse failed (attempt {}): {}", attempt + 1, exc)
-            last_exc = exc
         except openai.BadRequestError as exc:
-            logger.warning("Deal triage JSON failed (attempt {}): {}", attempt + 1, exc)
-            last_exc = exc
+            logger.warning(
+                "Deal triage JSON failed (attempt {}), retrying without response_format: {}",
+                attempt + 1, exc,
+            )
+            try:
+                data = await _request_json_reply(
+                    client, settings, messages, max_tokens=1024
+                )
+                if isinstance(data, list):
+                    data = {"listings": data}
+                items = DealTriageResponse.model_validate(data).listings
+                return [item.model_dump() for item in items]
+            except (json.JSONDecodeError, ValueError) as fallback_exc:
+                logger.warning(
+                    "Deal triage fallback parse failed (attempt {}): {}",
+                    attempt + 1, fallback_exc,
+                )
         except Exception as exc:
             logger.error("Deal triage LLM call failed: {}", exc)
             return [{"index": offset + i, "verdict": "skip"} for i in range(len(batch))]
@@ -423,7 +460,7 @@ async def _analysis_batch(
 
             # Final answer — parse JSON
             if msg.content:
-                data = json.loads(msg.content)
+                data = extract_json_payload(msg.content)
                 if isinstance(data, list):
                     data = {"listings": data}
                 items = DealAnalysisResponse.model_validate(data).listings
@@ -431,13 +468,17 @@ async def _analysis_batch(
             break
 
         # Fallback: force a final JSON response without tools
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=messages,
-            max_tokens=2048,
-            response_format={"type": "json_object"},
-        )
-        data = json.loads(response.choices[0].message.content or '{"listings":[]}')
+        try:
+            response = await client.chat.completions.create(
+                model=settings.llm_model,
+                messages=messages,
+                max_tokens=2048,
+                response_format={"type": "json_object"},
+            )
+            data = extract_json_payload(response.choices[0].message.content or '{"listings":[]}')
+        except openai.BadRequestError as exc:
+            logger.warning("Deal analysis JSON fallback triggered: {}", exc)
+            data = await _request_json_reply(client, settings, messages, max_tokens=2048)
         if isinstance(data, list):
             data = {"listings": data}
         items = DealAnalysisResponse.model_validate(data).listings

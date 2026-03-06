@@ -58,6 +58,8 @@ Ver [.env.example](.env.example) para todas las variables. Las principales:
 | --------------------- | --------------------------------------------------------- |
 | `LLM_API_KEY`         | API key de Groq                                           |
 | `EMBEDDING_API_KEY`   | API key de OpenAI (embeddings)                            |
+| `POSTGRES_PASSWORD`   | Password del usuario PostgreSQL interno                   |
+| `DATABASE_URL`        | Cadena de conexión que usan los workers                   |
 | `FB_LOCATIONS`        | `nombre:fb_location_id,...` (ej: `tacna:111957248821463`) |
 | `FB_SEARCH_QUERIES`   | Queries separadas por coma                                |
 | `OBSIDIAN_VAULT_PATH` | Ruta al vault (dentro del container: `/app/vault`)        |
@@ -140,6 +142,8 @@ ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose logs -f fb-work
 - **Rate limiting:** El agente incluye delays entre requests para evitar bloqueos.
 - **MercadoLibre API:** La API pública de búsqueda puede retornar 403 — el pipeline FB degrada gracefully sin precios de referencia.
 - **pgvector:** Extensión de PostgreSQL para búsqueda vectorial. Se ejecuta como servicio Docker con persistencia en volumen `pgdata`.
+- **Seguridad local:** Postgres queda publicado solo en `127.0.0.1` y las credenciales viven en `.env`, no en `docker-compose.yml`.
+- **OAuth de YouTube:** Guarda `client_secret.json` y `youtube_token.json` dentro de `profiles/`, no en la raíz del repo.
 
 ## Documentación técnica
 

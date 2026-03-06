@@ -110,13 +110,13 @@ def main() -> None:
         asyncio.run(run_pipeline())
         return
 
-    logger.info("Starting Arxiv worker daemon (hours: {})", settings.scrape_hours_list)
+    logger.info("Starting Arxiv worker daemon (hour: {})", settings.arxiv_hour)
     scheduler = AsyncIOScheduler()
 
-    hours_str = ",".join(str(h) for h in settings.scrape_hours_list)
+    hour_str = str(settings.arxiv_hour)
     scheduler.add_job(
         run_pipeline,
-        CronTrigger(hour=hours_str),
+        CronTrigger(hour=hour_str),
         id="arxiv_papers",
         name="Arxiv paper collection",
         replace_existing=True,

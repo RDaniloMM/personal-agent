@@ -24,8 +24,19 @@ from googleapiclient.discovery import build
 _SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 
 # Default paths (overridable)
-_DEFAULT_CLIENT_SECRET = Path("client_secret.json")
+_DEFAULT_CLIENT_SECRET = Path("profiles/client_secret.json")
 _DEFAULT_TOKEN = Path("profiles/youtube_token.json")
+_LEGACY_CLIENT_SECRET = Path("client_secret.json")
+
+
+def _resolve_client_secret_path(client_secret_path: Path) -> Path:
+    """Prefer profiles/, but keep backward compatibility with the old root path."""
+    if client_secret_path == _DEFAULT_CLIENT_SECRET:
+        if client_secret_path.exists():
+            return client_secret_path
+        if _LEGACY_CLIENT_SECRET.exists():
+            return _LEGACY_CLIENT_SECRET
+    return client_secret_path
 
 
 def authorize(
@@ -33,6 +44,7 @@ def authorize(
     token_path: Path = _DEFAULT_TOKEN,
 ) -> Credentials:
     """Run the OAuth2 flow (opens browser) and persist the token."""
+    client_secret_path = _resolve_client_secret_path(client_secret_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
 
     creds: Credentials | None = None
@@ -88,7 +100,7 @@ def main() -> None:
         "--client-secret",
         type=Path,
         default=_DEFAULT_CLIENT_SECRET,
-        help="Path to OAuth2 client secret JSON",
+        help="Path to OAuth2 client secret JSON (default: profiles/client_secret.json)",
     )
     parser.add_argument(
         "--token",
