@@ -52,30 +52,46 @@ async def run_pipeline() -> None:
         logger.info("No videos found — skipping")
         return
 
-    # 2. Index in pgvector (deduplicated)
-    from shared.storage.zvec_store import get_existing_ids, upsert_documents
+    # 2. Filter against pgvector knowledge base and index only new videos
+    from shared.storage.zvec_store import (
+        get_existing_ids,
+        make_document_id,
+        upsert_documents,
+    )
 
     existing = get_existing_ids("youtube_feed", settings)
-    new_videos = [v for v in videos if v.get("url") and v["url"] not in existing]
+    new_videos = [
+        v
+        for v in videos
+        if v.get("url") and make_document_id(v, "youtube_feed") not in existing
+    ]
 
-    indexed = 0
-    if new_videos:
-        indexed = upsert_documents("youtube_feed", new_videos, "title", settings)
-    logger.info("Indexed {} new videos (skipped {})", indexed, len(videos) - len(new_videos))
+    if not new_videos:
+        logger.info("No new videos after pgvector dedup — skipping notes and ideas")
+        return
+
+    indexed = upsert_documents("youtube_feed", new_videos, "title", settings)
+    logger.info(
+        "Indexed {} new videos (skipped {})", indexed, len(videos) - len(new_videos)
+    )
 
     # 3. Write Obsidian notes
     from shared.storage.obsidian import write_youtube_summary
 
-    write_youtube_summary(videos, settings)
+    write_youtube_summary(new_videos, settings)
 
     # 4. Extract ideas with LLM
     from shared.writer import extract_and_write_ideas
 
-    if videos:
-        summary = _build_summary(videos)
-        await extract_and_write_ideas(summary, settings, reasoning_effort="medium")
+    summary = _build_summary(new_videos)
+    await extract_and_write_ideas(summary, settings, reasoning_effort="medium")
 
-    logger.info("✓ YouTube pipeline complete | videos={} | indexed={}", len(videos), indexed)
+    logger.info(
+        "✓ YouTube pipeline complete | videos={} | new={} | indexed={}",
+        len(videos),
+        len(new_videos),
+        indexed,
+    )
 
 
 def _build_summary(videos: list[dict]) -> str:
@@ -97,7 +113,9 @@ def main() -> None:
         asyncio.run(run_pipeline())
         return
 
-    logger.info("Starting YouTube worker daemon (hours: {})", settings.yt_scrape_hours_list)
+    logger.info(
+        "Starting YouTube worker daemon (hours: {})", settings.yt_scrape_hours_list
+    )
     scheduler = AsyncIOScheduler()
 
     hours_str = ",".join(str(h) for h in settings.yt_scrape_hours_list)

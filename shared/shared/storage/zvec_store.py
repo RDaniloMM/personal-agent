@@ -80,10 +80,22 @@ def get_existing_ids(
             cur.execute(f"SELECT id FROM {collection_name}")
             return {row[0] for row in cur.fetchall()}
     except Exception as exc:
-        logger.warning("Could not fetch existing IDs from '{}': {}", collection_name, exc)
+        logger.warning(
+            "Could not fetch existing IDs from '{}': {}", collection_name, exc
+        )
         return set()
     finally:
         conn.close()
+
+
+def make_document_id(
+    doc: dict[str, Any],
+    collection_name: str,
+) -> str:
+    """Return the deterministic storage ID for a document."""
+    if collection_name not in _COLLECTIONS:
+        raise ValueError(f"Unknown collection: {collection_name}")
+    return _make_id(doc, collection_name)
 
 
 # ── CRUD operations ──────────────────────────────────────────────────────────
@@ -103,8 +115,7 @@ def upsert_documents(
         raise ValueError(f"Unknown collection: {collection_name}")
 
     texts = [
-        doc.get(text_field, "") or doc.get("title", "No text")
-        for doc in documents
+        doc.get(text_field, "") or doc.get("title", "No text") for doc in documents
     ]
     embeddings = embed_texts(texts, settings)
 
@@ -115,7 +126,7 @@ def upsert_documents(
 
         with conn.cursor() as cur:
             for doc, text, emb in zip(documents, texts, embeddings):
-                doc_id = _make_id(doc, collection_name)
+                doc_id = make_document_id(doc, collection_name)
                 cur.execute(
                     f"""
                     INSERT INTO {collection_name} (id, text, embedding, metadata)
