@@ -61,23 +61,34 @@ async def run_pipeline() -> None:
     # 2b. Enrich deals with seller descriptions
     if deals:
         from fb_worker.crawler import enrich_with_descriptions
+
         deals = await enrich_with_descriptions(deals, max_items=20)
 
     # 3. Index in pgvector (deduplicated)
-    from shared.storage.zvec_store import get_existing_ids, upsert_documents
+    from shared.storage.zvec_store import (
+        get_existing_ids,
+        make_document_id,
+        upsert_documents,
+    )
 
     existing = get_existing_ids("fb_marketplace", settings)
-    new_listings = [d for d in deals if d.get("url") and d["url"] not in existing]
+    new_listings = [
+        d
+        for d in deals
+        if d.get("url") and make_document_id(d, "fb_marketplace") not in existing
+    ]
 
     indexed = 0
     if new_listings:
         indexed = upsert_documents("fb_marketplace", new_listings, "title", settings)
-    logger.info("Indexed {} new listings (skipped {})", indexed, len(deals) - len(new_listings))
+    logger.info(
+        "Indexed {} new listings (skipped {})", indexed, len(deals) - len(new_listings)
+    )
 
     # 4. Write Obsidian notes
     from shared.storage.obsidian import write_marketplace_summary
 
-    write_marketplace_summary(deals, settings)
+    write_marketplace_summary(deals, settings, total_scraped=len(all_listings))
 
     # 5. Extract ideas with LLM
     from shared.writer import extract_and_write_ideas

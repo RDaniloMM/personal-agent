@@ -14,7 +14,7 @@ from shared.config import Settings
 
 # ── Frontmatter helper ───────────────────────────────────────────────────────
 
-_YAML_SPECIAL = re.compile(r'[:#\[\]{}>,|&*!%@`\\]')
+_YAML_SPECIAL = re.compile(r"[:#\[\]{}>,|&*!%@`\\]")
 
 
 def _yaml_value(value: Any) -> str:
@@ -25,7 +25,7 @@ def _yaml_value(value: Any) -> str:
         return str(value)
     s = str(value)
     if _YAML_SPECIAL.search(s) or s.strip() != s:
-        return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return s
 
 
@@ -60,7 +60,10 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
 
     if filepath.exists():
         existing = filepath.read_text(encoding="utf-8")
-        if "Error en análisis" not in existing and "Análisis no disponible" not in existing:
+        if (
+            "Error en análisis" not in existing
+            and "Análisis no disponible" not in existing
+        ):
             logger.debug("Paper note already exists: {}", filepath.name)
             return str(filepath)
         logger.info("Overwriting broken paper note: {}", filepath.name)
@@ -91,27 +94,27 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
 
 ## Resumen
 
-{summary if summary else paper.get('abstract', '')}
+{summary if summary else paper.get("abstract", "")}
 
 ## Abstract original
 
-{paper.get('abstract', '')}
+{paper.get("abstract", "")}
 
 ## Conclusiones
 
-{conclusions if conclusions else '> _Sin análisis_'}
+{conclusions if conclusions else "> _Sin análisis_"}
 
 ## Aportes clave
 
-{contributions if contributions else '> _Sin análisis_'}
+{contributions if contributions else "> _Sin análisis_"}
 
 ## Puntos importantes
 
-{key_takeaways if key_takeaways else '> _Sin análisis_'}
+{key_takeaways if key_takeaways else "> _Sin análisis_"}
 
 ## Antecedente para Tesis (APA 7)
 
-{thesis_paragraph if thesis_paragraph else '> _Sin párrafo de antecedente generado_'}
+{thesis_paragraph if thesis_paragraph else "> _Sin párrafo de antecedente generado_"}
 
 ## Notas
 
@@ -122,7 +125,10 @@ def write_arxiv_paper(paper: dict[str, Any], settings: Settings) -> str:
 
 
 def write_marketplace_summary(
-    listings: list[dict[str, Any]], settings: Settings
+    listings: list[dict[str, Any]],
+    settings: Settings,
+    *,
+    total_scraped: int | None = None,
 ) -> str:
     """Write a daily summary of FB Marketplace deals (only great bargains)."""
     folder = settings.obsidian_subfolder("FB-Marketplace")
@@ -131,7 +137,7 @@ def write_marketplace_summary(
     filepath = folder / filename
 
     deals = [l for l in listings if l.get("is_deal")]
-    total_scraped = len(listings)
+    total_scraped = len(listings) if total_scraped is None else total_scraped
 
     fm = _frontmatter(
         {
@@ -195,9 +201,7 @@ def write_marketplace_summary(
     return str(filepath)
 
 
-def write_youtube_summary(
-    videos: list[dict[str, Any]], settings: Settings
-) -> str:
+def write_youtube_summary(videos: list[dict[str, Any]], settings: Settings) -> str:
     """Write a daily summary of scraped YouTube videos with rich metadata."""
     folder = settings.obsidian_subfolder("YouTube")
     date_str = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -215,15 +219,15 @@ def write_youtube_summary(
 
     items_md = ""
     for v in videos[:40]:
-        title = v.get('title', 'Sin título')
-        channel = v.get('channel', 'N/A')
-        url = v.get('url', '')
-        views = v.get('views', '')
-        duration = v.get('duration', '')
-        upload_date = v.get('upload_date', '')
-        description = (v.get('description', '') or '')[:400]
-        tags = v.get('tags', [])
-        subtitles = (v.get('subtitles', '') or '')[:500]
+        title = v.get("title", "Sin título")
+        channel = v.get("channel", "N/A")
+        url = v.get("url", "")
+        views = v.get("views", "")
+        duration = v.get("duration", "")
+        upload_date = v.get("upload_date", "")
+        description = (v.get("description", "") or "")[:400]
+        tags = v.get("tags", [])
+        subtitles = (v.get("subtitles", "") or "")[:500]
 
         tags_str = ", ".join(tags[:8]) if tags else "N/A"
 
@@ -266,14 +270,14 @@ def _strip_llm_frontmatter(content: str) -> str:
         end = text.find("---", 3)
         if end == -1:
             break
-        text = text[end + 3:].strip()
+        text = text[end + 3 :].strip()
     # Strip leading # title line(s)
     while text.startswith("# "):
         newline = text.find("\n")
         if newline == -1:
             text = ""
             break
-        text = text[newline + 1:].strip()
+        text = text[newline + 1 :].strip()
     return text
 
 

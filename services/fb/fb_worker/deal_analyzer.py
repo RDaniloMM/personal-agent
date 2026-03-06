@@ -12,12 +12,12 @@ import asyncio
 import json
 import math
 import re
-from typing import Any
+from typing import Any, Literal, cast
 
 import httpx
 import openai
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from shared.config import Settings
 from shared.llm_json import extract_json_payload
@@ -28,7 +28,15 @@ from shared.llm_json import extract_json_payload
 
 class DealTriageItem(BaseModel):
     index: int = Field(description="0-based index of the listing in the batch")
-    verdict: str = Field(description="deal | maybe | skip")
+    verdict: Literal["deal", "maybe", "skip"] = Field(description="deal | maybe | skip")
+
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _normalize_verdict(cls, value: Any) -> str:
+        verdict = _normalize_verdict(value)
+        if verdict is None:
+            raise ValueError(f"Unsupported verdict: {value!r}")
+        return verdict
 
 
 class DealTriageResponse(BaseModel):
@@ -40,6 +48,18 @@ class DealAnalysisItem(BaseModel):
     estimated_market_price: str = Field(default="")
     discount_pct: int = Field(default=0)
     reason: str = Field(default="")
+
+    @field_validator("discount_pct", mode="before")
+    @classmethod
+    def _normalize_discount_pct(cls, value: Any) -> int:
+        if value in (None, ""):
+            return 0
+        if isinstance(value, str):
+            match = re.search(r"-?\d+(?:[.,]\d+)?", value)
+            if not match:
+                return 0
+            value = match.group().replace(",", ".")
+        return int(round(float(value)))
 
 
 class DealAnalysisResponse(BaseModel):
@@ -74,18 +94,22 @@ async def _search_mercadolibre(
         async with httpx.AsyncClient(timeout=_ML_TIMEOUT, headers=headers) as client:
             resp = await client.get(_ML_SEARCH_URL, params=params)
             if resp.status_code != 200:
-                logger.warning("MercadoLibre search failed ({}): {}", resp.status_code, query)
+                logger.warning(
+                    "MercadoLibre search failed ({}): {}", resp.status_code, query
+                )
                 return []
             data = resp.json()
             results = []
             for item in data.get("results", []):
-                results.append({
-                    "title": item.get("title", ""),
-                    "price": item.get("price", 0),
-                    "currency": item.get("currency_id", "PEN"),
-                    "condition": item.get("condition", ""),
-                    "permalink": item.get("permalink", ""),
-                })
+                results.append(
+                    {
+                        "title": item.get("title", ""),
+                        "price": item.get("price", 0),
+                        "currency": item.get("currency_id", "PEN"),
+                        "condition": item.get("condition", ""),
+                        "permalink": item.get("permalink", ""),
+                    }
+                )
             return results
     except Exception as exc:
         logger.warning("MercadoLibre search error for '{}': {}", query, exc)
@@ -141,11 +165,17 @@ _CALC_TOOL = {
 
 def _safe_eval(expression: str) -> str:
     """Safely evaluate a math expression (no exec/eval of arbitrary code)."""
-    sanitized = re.sub(r'[^0-9+\-*/().,%\s]', '', expression)
-    sanitized = sanitized.replace('%', '/100')
+    sanitized = re.sub(r"[^0-9+\-*/().,%\s]", "", expression)
+    sanitized = sanitized.replace("%", "/100")
     try:
         code = compile(sanitized, "<calc>", "eval")
-        allowed_names = {"abs": abs, "round": round, "min": min, "max": max, "math": math}
+        allowed_names = {
+            "abs": abs,
+            "round": round,
+            "min": min,
+            "max": max,
+            "math": math,
+        }
         result = eval(code, {"__builtins__": {}}, allowed_names)  # noqa: S307
         return str(round(result, 2))
     except Exception:
@@ -236,20 +266,25 @@ async def analyze_deals(
 
     logger.info(
         "Deal triage: {} deals, {} maybe, {} skip (of {} total)",
-        len(deal_indices), len(maybe_indices), skip_count, len(listings),
+        len(deal_indices),
+        len(maybe_indices),
+        skip_count,
+        len(listings),
     )
 
     if not deal_indices:
         return []
 
     # ── Phase 2: Price research on MercadoLibre ──────────────────────
-    deal_listings = [(idx, listings[idx]) for idx in deal_indices if idx < len(listings)]
+    deal_listings = [
+        (idx, listings[idx]) for idx in deal_indices if idx < len(listings)
+    ]
     logger.info("Searching MercadoLibre for {} deal candidates…", len(deal_listings))
 
     market_data: dict[int, list[dict]] = {}
     for _local_i, (global_idx, listing) in enumerate(deal_listings):
         title = listing.get("title", "")
-        query = re.sub(r'\b\d{4,}\b', '', title).strip()[:80]
+        query = re.sub(r"\b\d{4,}\b", "", title).strip()[:80]
         if query:
             results = await _search_mercadolibre(query, limit=5, condition="used")
             if not results:
@@ -267,7 +302,8 @@ async def analyze_deals(
 
     logger.info(
         "MercadoLibre: found prices for {}/{} listings",
-        len(market_data), len(deal_listings),
+        len(market_data),
+        len(deal_listings),
     )
 
     # ── Phase 3: Full analysis with market context + calculator ──────
@@ -282,13 +318,15 @@ async def analyze_deals(
     enriched: list[dict[str, Any]] = []
     for idx, listing in deal_listings:
         analysis = analyses.get(idx, {})
-        enriched.append({
-            **listing,
-            "is_deal": True,
-            "deal_reason": analysis.get("reason", "Precio atractivo"),
-            "estimated_market_price": analysis.get("estimated_market_price", ""),
-            "discount_pct": analysis.get("discount_pct", 0),
-        })
+        enriched.append(
+            {
+                **listing,
+                "is_deal": True,
+                "deal_reason": analysis.get("reason", "Precio atractivo"),
+                "estimated_market_price": analysis.get("estimated_market_price", ""),
+                "discount_pct": analysis.get("discount_pct", 0),
+            }
+        )
 
     logger.info("Deal analysis complete: {} deals enriched", len(enriched))
     return enriched
@@ -306,9 +344,7 @@ def _listing_snippet(listing: dict[str, Any], index: int) -> str:
     return f"[{index}] {title} — {price} (S/ {price_num:.0f}) — {location}. {desc}"
 
 
-_JSON_ONLY_SYSTEM = (
-    "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
-)
+_JSON_ONLY_SYSTEM = "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
 
 
 async def _request_json_reply(
@@ -318,12 +354,31 @@ async def _request_json_reply(
     *,
     max_tokens: int,
 ) -> Any:
-    response = await client.chat.completions.create(
-        model=settings.llm_model,
-        messages=[{"role": "system", "content": _JSON_ONLY_SYSTEM}, *messages],
+    content = await _request_text_reply(
+        client,
+        settings,
+        messages,
         max_tokens=max_tokens,
     )
-    return extract_json_payload(response.choices[0].message.content or "{}")
+    return extract_json_payload(content or "{}")
+
+
+async def _request_text_reply(
+    client: openai.AsyncOpenAI,
+    settings: Settings,
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int,
+) -> str:
+    response = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=cast(
+            Any,
+            [{"role": "system", "content": _JSON_ONLY_SYSTEM}, *messages],
+        ),
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content or ""
 
 
 # ── Phase 1: Triage ─────────────────────────────────────────────────────────
@@ -337,6 +392,7 @@ async def _triage_batch(
     *,
     _retries: int = 2,
 ) -> list[dict[str, Any]]:
+    expected_indices = [offset + i for i in range(len(batch))]
     items_text = "\n".join(
         _listing_snippet(item, offset + i) for i, item in enumerate(batch)
     )
@@ -347,46 +403,27 @@ async def _triage_batch(
 
     for attempt in range(_retries + 1):
         try:
-            response = await client.chat.completions.create(
-                model=settings.llm_model,
-                messages=messages,
+            content = await _request_text_reply(
+                client,
+                settings,
+                messages,
                 max_tokens=1024,
-                response_format={"type": "json_object"},
             )
-            data = extract_json_payload(response.choices[0].message.content or '{"listings":[]}')
-            if isinstance(data, list):
-                data = {"listings": data}
-            items = DealTriageResponse.model_validate(data).listings
+            items = _parse_triage_items(content, expected_indices)
             return [item.model_dump() for item in items]
         except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Deal triage parse failed (attempt {}): {}", attempt + 1, exc)
-        except openai.BadRequestError as exc:
             logger.warning(
-                "Deal triage JSON failed (attempt {}), retrying without response_format: {}",
-                attempt + 1, exc,
+                "Deal triage parse failed (attempt {}): {}", attempt + 1, exc
             )
-            try:
-                data = await _request_json_reply(
-                    client, settings, messages, max_tokens=1024
-                )
-                if isinstance(data, list):
-                    data = {"listings": data}
-                items = DealTriageResponse.model_validate(data).listings
-                return [item.model_dump() for item in items]
-            except (json.JSONDecodeError, ValueError) as fallback_exc:
-                logger.warning(
-                    "Deal triage fallback parse failed (attempt {}): {}",
-                    attempt + 1, fallback_exc,
-                )
         except Exception as exc:
             logger.error("Deal triage LLM call failed: {}", exc)
-            return [{"index": offset + i, "verdict": "skip"} for i in range(len(batch))]
+            return _heuristic_triage_batch(batch, offset)
 
         if attempt < _retries:
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(2**attempt)
 
-    logger.warning("Deal triage exhausted retries, fallback to skip")
-    return [{"index": offset + i, "verdict": "skip"} for i in range(len(batch))]
+    logger.warning("Deal triage exhausted retries, using heuristic fallback")
+    return _heuristic_triage_batch(batch, offset)
 
 
 # ── Phase 3: Analysis with ML prices + calculator ───────────────────────────
@@ -400,9 +437,8 @@ async def _analysis_batch(
     *,
     _max_tool_rounds: int = 3,
 ) -> list[dict[str, Any]]:
-    items_text = "\n".join(
-        _listing_snippet(listing, idx) for idx, listing in batch
-    )
+    expected_indices = [idx for idx, _ in batch]
+    items_text = "\n".join(_listing_snippet(listing, idx) for idx, listing in batch)
     market_context = _format_market_context(market_data)
 
     user_content = f"Analiza estas gangas:\n{items_text}"
@@ -419,9 +455,9 @@ async def _analysis_batch(
         for _round in range(_max_tool_rounds):
             response = await client.chat.completions.create(
                 model=settings.llm_model,
-                messages=messages,
+                messages=cast(Any, messages),
                 max_tokens=2048,
-                tools=[_CALC_TOOL],
+                tools=cast(Any, [_CALC_TOOL]),
                 tool_choice="auto",
             )
             msg = response.choices[0].message
@@ -435,11 +471,11 @@ async def _analysis_batch(
                     "content": msg.content or "",
                     "tool_calls": [
                         {
-                            "id": tc.id,
+                            "id": cast(Any, tc).id,
                             "type": "function",
                             "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
+                                "name": cast(Any, tc).function.name,
+                                "arguments": cast(Any, tc).function.arguments,
                             },
                         }
                         for tc in msg.tool_calls
@@ -447,41 +483,31 @@ async def _analysis_batch(
                 }
                 messages.append(assistant_msg)
                 for tc in msg.tool_calls:
-                    if tc.function.name == "calculate":
-                        args = json.loads(tc.function.arguments)
+                    tool_call = cast(Any, tc)
+                    if tool_call.function.name == "calculate":
+                        args = json.loads(tool_call.function.arguments)
                         result = _safe_eval(args.get("expression", "0"))
-                        logger.debug("Calculator: {} = {}", args.get("expression"), result)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result,
-                        })
+                        logger.debug(
+                            "Calculator: {} = {}", args.get("expression"), result
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": result,
+                            }
+                        )
                 continue
 
             # Final answer — parse JSON
             if msg.content:
-                data = extract_json_payload(msg.content)
-                if isinstance(data, list):
-                    data = {"listings": data}
-                items = DealAnalysisResponse.model_validate(data).listings
+                items = _parse_analysis_items(msg.content, expected_indices)
                 return [item.model_dump() for item in items]
             break
 
         # Fallback: force a final JSON response without tools
-        try:
-            response = await client.chat.completions.create(
-                model=settings.llm_model,
-                messages=messages,
-                max_tokens=2048,
-                response_format={"type": "json_object"},
-            )
-            data = extract_json_payload(response.choices[0].message.content or '{"listings":[]}')
-        except openai.BadRequestError as exc:
-            logger.warning("Deal analysis JSON fallback triggered: {}", exc)
-            data = await _request_json_reply(client, settings, messages, max_tokens=2048)
-        if isinstance(data, list):
-            data = {"listings": data}
-        items = DealAnalysisResponse.model_validate(data).listings
+        content = await _request_text_reply(client, settings, messages, max_tokens=2048)
+        items = _parse_analysis_items(content, expected_indices)
         return [item.model_dump() for item in items]
 
     except (json.JSONDecodeError, ValueError) as exc:
@@ -490,3 +516,191 @@ async def _analysis_batch(
     except Exception as exc:
         logger.error("Deal analysis LLM call failed: {}", exc)
         return [{"index": idx, "reason": ""} for idx, _ in batch]
+
+
+def _parse_triage_items(
+    content: str, expected_indices: list[int]
+) -> list[DealTriageItem]:
+    data = extract_json_payload(content or '{"listings":[]}')
+    normalized = _normalize_triage_payload(data, expected_indices)
+    return DealTriageResponse.model_validate(normalized).listings
+
+
+def _parse_analysis_items(
+    content: str, expected_indices: list[int]
+) -> list[DealAnalysisItem]:
+    data = extract_json_payload(content or '{"listings":[]}')
+    normalized = _normalize_analysis_payload(data, expected_indices)
+    return DealAnalysisResponse.model_validate(normalized).listings
+
+
+def _normalize_triage_payload(data: Any, expected_indices: list[int]) -> dict[str, Any]:
+    raw_items = _extract_items(data)
+    by_index: dict[int, dict[str, Any]] = {}
+
+    for pos, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            continue
+        index = _coerce_index(
+            item.get("index"), fallback=expected_indices, position=pos
+        )
+        verdict = _normalize_verdict(
+            item.get("verdict")
+            or item.get("classification")
+            or item.get("status")
+            or item.get("label")
+            or item.get("decision")
+        )
+        if index is None or verdict is None or index not in expected_indices:
+            continue
+        by_index[index] = {"index": index, "verdict": verdict}
+
+    return {
+        "listings": [
+            by_index.get(index, {"index": index, "verdict": "skip"})
+            for index in expected_indices
+        ]
+    }
+
+
+def _normalize_analysis_payload(
+    data: Any, expected_indices: list[int]
+) -> dict[str, Any]:
+    raw_items = _extract_items(data)
+    by_index: dict[int, dict[str, Any]] = {}
+
+    for pos, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            continue
+        index = _coerce_index(
+            item.get("index"), fallback=expected_indices, position=pos
+        )
+        if index is None or index not in expected_indices:
+            continue
+        by_index[index] = {
+            "index": index,
+            "estimated_market_price": str(
+                item.get("estimated_market_price")
+                or item.get("estimated_price")
+                or item.get("market_price")
+                or item.get("market_estimate")
+                or item.get("precio_mercado")
+                or ""
+            ),
+            "discount_pct": item.get("discount_pct")
+            or item.get("discount_percentage")
+            or item.get("discountPercent")
+            or item.get("discount")
+            or item.get("descuento_pct")
+            or item.get("descuento")
+            or 0,
+            "reason": str(
+                item.get("reason")
+                or item.get("why")
+                or item.get("justification")
+                or item.get("explicacion")
+                or ""
+            ),
+        }
+
+    return {
+        "listings": [
+            by_index.get(
+                index,
+                {
+                    "index": index,
+                    "estimated_market_price": "",
+                    "discount_pct": 0,
+                    "reason": "",
+                },
+            )
+            for index in expected_indices
+        ]
+    }
+
+
+def _extract_items(data: Any) -> list[Any]:
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("listings", "items", "results", "deals"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    if "index" in data:
+        return [data]
+    if data and all(str(key).strip().isdigit() for key in data):
+        return [
+            {"index": key, **(value if isinstance(value, dict) else {"verdict": value})}
+            for key, value in data.items()
+        ]
+    return []
+
+
+def _coerce_index(value: Any, *, fallback: list[int], position: int) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    if 0 <= position < len(fallback):
+        return fallback[position]
+    return None
+
+
+def _normalize_verdict(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    mapping = {
+        "deal": "deal",
+        "ganga": "deal",
+        "bargain": "deal",
+        "buy": "deal",
+        "maybe": "maybe",
+        "tal vez": "maybe",
+        "quizas": "maybe",
+        "revisar": "maybe",
+        "consider": "maybe",
+        "skip": "skip",
+        "descartar": "skip",
+        "pass": "skip",
+        "ignore": "skip",
+    }
+    return mapping.get(text)
+
+
+def _heuristic_triage_batch(
+    batch: list[dict[str, Any]], offset: int
+) -> list[dict[str, Any]]:
+    return [
+        {"index": offset + i, "verdict": _heuristic_verdict(item)}
+        for i, item in enumerate(batch)
+    ]
+
+
+def _heuristic_verdict(listing: dict[str, Any]) -> str:
+    title = (listing.get("title", "") or "").lower()
+    price = float(listing.get("price_numeric", 0) or 0)
+    if price <= 0:
+        return "skip"
+    if any(currency in title for currency in ("mx$", "usd", "dolar", "dólar")):
+        return "skip"
+
+    if "laptop" in title or "notebook" in title:
+        return "deal" if price <= 700 else "maybe" if price <= 1000 else "skip"
+    if any(
+        word in title
+        for word in ("iphone", "samsung", "xiaomi", "smartphone", "celular")
+    ):
+        return "deal" if price <= 350 else "maybe" if price <= 550 else "skip"
+    if any(word in title for word in ("monitor", "pantalla")):
+        return "deal" if price <= 180 else "maybe" if price <= 280 else "skip"
+    if any(word in title for word in ("tablet", "ipad")):
+        return "deal" if price <= 250 else "maybe" if price <= 400 else "skip"
+    if any(word in title for word in ("libro", "libros", "novela")):
+        return "deal" if price <= 10 else "maybe" if price <= 20 else "skip"
+    if any(
+        word in title
+        for word in ("audifono", "audífono", "teclado", "mouse", "parlante", "gadget")
+    ):
+        return "deal" if price <= 60 else "maybe" if price <= 120 else "skip"
+    return "maybe" if price <= 100 else "skip"
