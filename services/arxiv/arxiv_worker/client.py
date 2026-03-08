@@ -1,6 +1,6 @@
 """Arxiv paper collector using the arxiv.py library (free, no API key).
 
-Downloads PDFs as raw bytes for native Gemini vision analysis.
+Downloads PDFs as raw bytes so the analyzer can extract text locally.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ ARXIV_QUERIES: list[str] = [
 async def collect_arxiv_papers(settings: Settings) -> list[dict[str, Any]]:
     """Fetch recent papers from Arxiv matching pre-defined AI research queries.
 
-    Downloads PDFs and extracts full text for deep analysis.
-    Returns a deduplicated list of paper dicts with 'full_text' field.
+    Downloads PDFs for deep analysis.
+    Returns a deduplicated list of paper dicts with 'pdf_bytes' populated when available.
     """
     client = arxiv.Client(
         page_size=50,
@@ -77,7 +77,7 @@ async def collect_arxiv_papers(settings: Settings) -> list[dict[str, Any]]:
         len(ARXIV_QUERIES),
     )
 
-    # Download PDFs (raw bytes for Gemini native vision)
+    # Download PDFs (raw bytes for later local text extraction)
     await _download_pdfs(papers_list)
 
     return papers_list
@@ -85,7 +85,7 @@ async def collect_arxiv_papers(settings: Settings) -> list[dict[str, Any]]:
 
 # ── PDF download & text extraction ──────────────────────────────────────────
 
-_MAX_PDF_SIZE_MB = 50  # PDFs grandes van via Files API en el analyzer
+_MAX_PDF_SIZE_MB = 50  # PDFs mayores se omiten para evitar descargas excesivas
 _PDF_DOWNLOAD_TIMEOUT = 120
 
 
@@ -111,8 +111,7 @@ async def _download_pdf(url: str) -> bytes | None:
 async def _download_pdfs(papers: list[dict[str, Any]]) -> None:
     """Download PDFs and store raw bytes in each paper dict.
 
-    The raw PDF bytes are sent directly to Gemini's native document
-    vision API — no local text extraction needed.
+    The raw PDF bytes are later converted to text for NVIDIA analysis.
     """
     import asyncio
 
@@ -138,6 +137,6 @@ async def _download_pdfs(papers: list[dict[str, Any]]) -> None:
                 paper["pdf_bytes"] = b""
 
     logger.info(
-        "PDF download: {}/{} papers ready for Gemini",
+        "PDF download: {}/{} papers ready for analysis",
         success, total,
     )

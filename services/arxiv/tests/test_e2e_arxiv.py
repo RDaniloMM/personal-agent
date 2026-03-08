@@ -2,8 +2,8 @@
 
 Runs a minimal version of the full pipeline using a specific paper:
   1. Fetch a known paper by ID (2602.17547v1)
-  2. Download PDF and extract full text as Markdown (pymupdf4llm)
-  3. Run the paper analyzer (triage + Gemini deep analysis with APA 7 paragraph)
+  2. Download PDF bytes for local text extraction
+  3. Run the paper analyzer (triage + NVIDIA deep analysis with APA 7 paragraph)
   4. Verify output structure including thesis_paragraph
 
 Usage (inside Docker):
@@ -76,7 +76,7 @@ async def _run_e2e() -> None:
     for key in ("arxiv_id", "title", "abstract", "authors", "pdf_url"):
         assert key in papers[0], f"Missing '{key}' in paper"
 
-    # ── Phase 1b: PDF download (raw bytes for Gemini) ───────────────
+    # ── Phase 1b: PDF download (raw bytes for local extraction) ─────
     await _download_pdfs(papers)
 
     pdf_bytes = papers[0].get("pdf_bytes", b"")
@@ -87,7 +87,7 @@ async def _run_e2e() -> None:
 
     assert pdf_bytes, "Expected pdf_bytes from PDF download"
 
-    # ── Phase 2: LLM analysis (triage + Gemini native PDF) ─────────
+    # ── Phase 2: LLM analysis (triage + NVIDIA deep analysis) ───────
     from arxiv_worker.paper_analyzer import analyze_papers
 
     analyzed = await analyze_papers(papers, settings)

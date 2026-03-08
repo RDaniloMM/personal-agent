@@ -67,6 +67,7 @@ personal-agent/
 Required variables:
 
 - `LLM_API_KEY` — Groq API key
+- `NVIDIA_API_KEY` — NVIDIA API key for deep Arxiv analysis
 - `EMBEDDING_API_KEY` — OpenAI API key
 - `OBSIDIAN_VAULT_PATH` — Path to the Obsidian vault (inside container: `/app/vault`)
 - `DATABASE_URL` — PostgreSQL connection string
@@ -88,8 +89,8 @@ Required variables:
 ### Arxiv (`arxiv-worker`)
 
 1. **Collect** — 4 hardcoded queries via `arxiv.py`, configurable `max_results`
-2. **Triage** — LLM classifies relevance as `high`/`medium`/`low` (JSON mode)
-3. **Full analysis** — LLM generates summary, conclusions, contributions, key takeaways
+2. **Triage** — Groq classifies relevance as `high`/`medium`/`low` (JSON mode)
+3. **Full analysis** — NVIDIA analyzes extracted PDF text and generates summary, conclusions, contributions, key takeaways
 4. **Index** — pgvector dedup by `arxiv_id`
 5. **Notes** — Obsidian per-paper notes + LLM idea extraction
 
@@ -103,8 +104,9 @@ Required variables:
 
 ## LLM Integration Notes
 
-- **Model**: `openai/gpt-oss-120b` via Groq (`https://api.groq.com/openai/v1`)
-- **JSON mode** (`response_format={"type": "json_object"}`): Used for triage and analysis in deal_analyzer and paper_analyzer. **Incompatible with `reasoning_effort` on this model** — do not add `extra_body` with reasoning params when using JSON mode.
+- **Primary model**: `openai/gpt-oss-120b` via Groq (`https://api.groq.com/openai/v1`)
+- **Arxiv deep analysis**: `moonshotai/kimi-k2.5` via NVIDIA (`https://integrate.api.nvidia.com/v1`) using the OpenAI-compatible chat completions API with `extra_body.chat_template_kwargs.thinking=true`
+- **JSON mode** (`response_format={"type": "json_object"}`): Used for Groq triage and fallback analysis. **Incompatible with `reasoning_effort` on this model** — do not add `extra_body` with reasoning params when using JSON mode.
 - **Tool use**: Used in `writer.py` (`write_idea_note` tool) and `deal_analyzer.py` (`calculate` tool). `reasoning_effort` works with tool use via `extra_body`.
 - **reasoning_effort**: Applied to `writer.py` calls only (`"medium"` for FB/YT, `"high"` for Arxiv).
 - **Groq tool call messages**: When re-sending assistant messages with tool calls back to Groq, you **must** construct a clean dict with only `role`, `content`, and `tool_calls` fields. The OpenAI SDK's `msg.model_dump()` includes extra fields (`annotations`, `audio`, etc.) that Groq rejects with 400 errors.
@@ -139,7 +141,7 @@ Tests run **inside Docker containers** since each worker has its own dependencie
 # FB Marketplace E2E (~2-3 min, crawls 1 query × 1 location, calls Groq + MercadoLibre)
 docker compose run --rm fb-worker uv run python -m tests.test_e2e_fb
 
-# Arxiv E2E (~30s, fetches 1 paper, calls Groq for analysis)
+# Arxiv E2E (~30s, fetches 1 paper, calls Groq + NVIDIA for analysis)
 docker compose run --rm arxiv-worker uv run python -m tests.test_e2e_arxiv
 
 # YouTube E2E (~30s, searches 1 video via yt-dlp, enriches metadata)

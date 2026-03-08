@@ -1,8 +1,8 @@
 """LLM-powered paper analysis: relevance classification & key-point extraction.
 
 Phase 1 (Triage): Groq (fast, cheap) — classifies relevance from abstract only.
-Phase 2 (Analysis): Gemini (deep, large context) — full paper text analysis
-including APA 7 thesis paragraph generation.
+Phase 2 (Analysis): NVIDIA (deep, large context) — PDF text extraction plus
+full paper analysis including APA 7 thesis paragraph generation.
 """
 
 from __future__ import annotations
@@ -10,20 +10,15 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import time
 from typing import Any, Literal
 
 import openai
-from google import genai
-from google.genai import types
 from loguru import logger
 from pydantic import BaseModel, Field
+from pypdf import PdfReader
 
 from shared.config import Settings
 from shared.llm_json import extract_json_payload
-
-
-# ── Pydantic models for structured LLM output ────────────────────────────────
 
 
 class TriageItem(BaseModel):
@@ -48,8 +43,6 @@ class AnalysisResponse(BaseModel):
     papers: list[AnalysisItem]
 
 
-# ── Research interests (used to judge relevance) ─────────────────────────
-
 RESEARCH_INTERESTS = """\
 - AI agents / agentic systems / autonomous architectures
 - LLM evaluation, benchmarks, agent evaluation frameworks
@@ -59,7 +52,6 @@ RESEARCH_INTERESTS = """\
 - AI agents in industry/production environments
 """
 
-# ── Phase 1: quick relevance triage ──────────────────────────────────────────
 
 _TRIAGE_SYSTEM = f"""Score each paper's relevance to these interests:
 {RESEARCH_INTERESTS}
@@ -69,7 +61,6 @@ Each element: {{"arxiv_id":"...","relevance":"high"|"medium"|"low"}}
 Example: {{"papers": [{{"arxiv_id": "2503.00001", "relevance": "high"}}]}}
 No incluyas texto fuera del JSON ni bloques markdown."""
 
-# ── Phase 2: full analysis ───────────────────────────────────────────────────
 
 _ANALYSIS_SYSTEM = f"""Eres un investigador experto en IA y un académico riguroso. Analiza cada paper EN PROFUNDIDAD basándote en su texto completo.
 
@@ -77,9 +68,9 @@ Devuelve un JSON con clave "papers" conteniendo un array. Cada elemento debe ten
 
 1. **arxiv_id**: string (el ID del paper)
 2. **summary**: 3-5 oraciones cubriendo la contribución central, metodología y resultados principales (en español)
-3. **conclusions**: bullet points de los hallazgos y resultados principales (en español, separados por \\n)
-4. **contributions**: bullet points de las contribuciones novedosas al campo (en español, separados por \\n)
-5. **key_takeaways**: 3-5 insights accionables o implicaciones prácticas (en español, separados por \\n)
+3. **conclusions**: bullet points de los hallazgos y resultados principales (en español, separados por \n)
+4. **contributions**: bullet points de las contribuciones novedosas al campo (en español, separados por \n)
+5. **key_takeaways**: 3-5 insights accionables o implicaciones prácticas (en español, separados por \n)
 6. **thesis_paragraph**: Un párrafo académico completo para usar como ANTECEDENTE en una tesis, en formato APA 7. Este párrafo DEBE seguir EXACTAMENTE esta estructura:
 
    a) CITACIÓN Y PRESENTACIÓN: "[Apellido(s)] et al. (año) presentan [NOMBRE DEL FRAMEWORK/HERRAMIENTA/MÉTODO], [descripción breve], su objetivo es [objetivo principal del estudio]."
@@ -104,31 +95,37 @@ Escribe TODO en español. No incluyas texto fuera del JSON ni bloques markdown."
 
 _ABSTRACT_LIMIT = 300
 _TRIAGE_BATCH = 20
-_ANALYSIS_BATCH = 1  # One paper at a time for deep Gemini analysis
+_ANALYSIS_BATCH = 1
+_NVIDIA_RETRIES = 2
+_NVIDIA_REQUEST_TIMEOUT = 180
+_PDF_TEXT_CHAR_LIMIT = 120000
+_JSON_ONLY_SYSTEM = (
+    "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
+)
 
 
 async def analyze_papers(
     papers: list[dict[str, Any]], settings: Settings
 ) -> list[dict[str, Any]]:
-    """Two-phase analysis: Groq triage (fast) → Gemini deep analysis (full text)."""
+    """Two-phase analysis: Groq triage (fast) → NVIDIA deep analysis (full text)."""
     if not papers:
         return []
 
-    # Groq client for fast triage
     groq_client = openai.AsyncOpenAI(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
     )
 
-    # Gemini client for deep analysis (native SDK — sends PDF bytes directly)
-    gemini_native: genai.Client | None = None
-    if settings.gemini_api_key:
-        gemini_native = genai.Client(api_key=settings.gemini_api_key)
-        logger.info("Using Gemini ({}) with native PDF vision", settings.gemini_model)
+    nvidia_client: openai.AsyncOpenAI | None = None
+    if settings.nvidia_api_key:
+        nvidia_client = openai.AsyncOpenAI(
+            api_key=settings.nvidia_api_key,
+            base_url=settings.nvidia_base_url,
+        )
+        logger.info("Using NVIDIA ({}) for deep paper analysis", settings.nvidia_model)
     else:
-        logger.warning("No GEMINI_API_KEY set — falling back to Groq for analysis")
+        logger.warning("No NVIDIA_API_KEY set — falling back to Groq for analysis")
 
-    # ── Phase 1: Triage (Groq — fast, abstract only) ─────────
     relevance_map: dict[str, str] = {}
     for i in range(0, len(papers), _TRIAGE_BATCH):
         batch = papers[i : i + _TRIAGE_BATCH]
@@ -152,12 +149,11 @@ async def analyze_papers(
     if not relevant_papers:
         return []
 
-    # ── Phase 2: Deep analysis (Gemini native PDF or Groq fallback) ──
     all_analyses: dict[str, dict[str, Any]] = {}
     for i in range(0, len(relevant_papers), _ANALYSIS_BATCH):
         batch = relevant_papers[i : i + _ANALYSIS_BATCH]
-        if gemini_native:
-            analyses = await _analysis_batch_gemini(batch, gemini_native, settings)
+        if nvidia_client:
+            analyses = await _analysis_batch_nvidia(batch, nvidia_client, settings)
         else:
             analyses = await _analysis_batch_groq(batch, groq_client, settings)
         for a in analyses:
@@ -178,9 +174,6 @@ async def analyze_papers(
         high_count, medium_count, low_count, len(enriched),
     )
     return enriched
-
-
-# ── Phase helpers ────────────────────────────────────────────────────────────
 
 
 def _paper_snippet(p: dict[str, Any], abstract_limit: int = _ABSTRACT_LIMIT) -> str:
@@ -214,11 +207,6 @@ def _parse_analysis(content: str) -> list[AnalysisItem]:
     return AnalysisResponse.model_validate(data).papers
 
 
-_JSON_ONLY_SYSTEM = (
-    "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
-)
-
-
 async def _request_json_reply(
     client: openai.AsyncOpenAI,
     settings: Settings,
@@ -226,9 +214,10 @@ async def _request_json_reply(
     *,
     max_tokens: int,
 ) -> Any:
+    request_messages: Any = [{"role": "system", "content": _JSON_ONLY_SYSTEM}, *messages]
     response = await client.chat.completions.create(
         model=settings.llm_model,
-        messages=[{"role": "system", "content": _JSON_ONLY_SYSTEM}, *messages],
+        messages=request_messages,
         max_tokens=max_tokens,
     )
     return extract_json_payload(response.choices[0].message.content or "{}")
@@ -249,9 +238,10 @@ async def _triage_batch(
 
     for attempt in range(_retries + 1):
         try:
+            request_messages: Any = messages
             response = await client.chat.completions.create(
                 model=settings.llm_model,
-                messages=messages,
+                messages=request_messages,
                 max_tokens=1024,
                 response_format={"type": "json_object"},
             )
@@ -260,7 +250,7 @@ async def _triage_batch(
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Triage parse/validation failed (attempt {}): {}", attempt + 1, exc)
         except openai.RateLimitError as exc:
-            wait = 15 * (attempt + 1)  # 15s, 30s ... deja pasar la ventana TPM
+            wait = 15 * (attempt + 1)
             logger.warning(
                 "Groq rate limit hit (attempt {}), waiting {}s: {}",
                 attempt + 1, wait, exc,
@@ -295,151 +285,167 @@ async def _triage_batch(
     return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
 
 
-_GEMINI_RETRIES = 2
-_GEMINI_REQUEST_TIMEOUT = 180
-_INLINE_PDF_MB = 10  # PDFs más grandes se suben via Files API
+def _extract_pdf_text(pdf_bytes: bytes, arxiv_id: str) -> str:
+    """Extract plain text from a PDF for chat-completion analysis."""
+    if not pdf_bytes:
+        return ""
 
-
-def _upload_pdf_blocking(
-    client: genai.Client,
-    pdf_bytes: bytes,
-    arxiv_id: str,
-) -> Any:
-    """Sube un PDF a la Files API de Gemini y espera a que esté ACTIVE.
-
-    Retorna el objeto File o None si falla.
-    Debe llamarse desde asyncio.to_thread.
-    """
     try:
-        uploaded = client.files.upload(
-            file=io.BytesIO(pdf_bytes),
-            config={"mime_type": "application/pdf", "display_name": arxiv_id},
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception as exc:
+        logger.warning("PDF open failed for {}: {}", arxiv_id, exc)
+        return ""
+
+    chunks: list[str] = []
+    current_chars = 0
+
+    for page_idx, page in enumerate(reader.pages, start=1):
+        try:
+            page_text = (page.extract_text() or "").strip()
+        except Exception as exc:
+            logger.debug("PDF text extraction failed for {} page {}: {}", arxiv_id, page_idx, exc)
+            continue
+
+        if not page_text:
+            continue
+
+        remaining = _PDF_TEXT_CHAR_LIMIT - current_chars
+        if remaining <= 0:
+            break
+
+        page_chunk = page_text[:remaining]
+        chunks.append(page_chunk)
+        current_chars += len(page_chunk)
+
+    if not chunks:
+        return ""
+
+    text = "\n\n".join(chunks)
+    if len(text) >= _PDF_TEXT_CHAR_LIMIT:
+        logger.info("PDF text for {} truncated to {} chars", arxiv_id, _PDF_TEXT_CHAR_LIMIT)
+    return text
+
+
+def _analysis_input_text(paper: dict[str, Any]) -> tuple[str, str]:
+    """Build the analysis payload from the PDF when possible, else abstract."""
+    arxiv_id = paper.get("arxiv_id", "")
+    pdf_bytes: bytes = paper.get("pdf_bytes", b"") or b""
+    pdf_text = _extract_pdf_text(pdf_bytes, arxiv_id)
+    abstract = paper.get("abstract", "") or ""
+
+    if pdf_text:
+        text = (
+            "Resumen/abstract:\n"
+            f"{abstract}\n\n"
+            "Texto extraido del PDF:\n"
+            f"{pdf_text}"
         )
-        # Esperar hasta que el archivo esté ACTIVE (normalmente <5s)
-        deadline = time.time() + 60
-        while uploaded.state.name != "ACTIVE":
-            if time.time() > deadline:
-                logger.warning("Files API: timeout waiting for {} to be ACTIVE", arxiv_id)
-                return None
-            time.sleep(2)
-            uploaded = client.files.get(name=uploaded.name)
-        return uploaded
-    except Exception as exc:
-        logger.error("Files API upload failed for {}: {}", arxiv_id, exc)
-        return None
+        return text, f"PDF text ({len(pdf_text) / 1000:.0f}K chars)"
+
+    return abstract, "abstract only"
 
 
-def _delete_file_blocking(client: genai.Client, file_name: str) -> None:
-    """Elimina un archivo de la Files API (llamar desde to_thread)."""
-    try:
-        client.files.delete(name=file_name)
-    except Exception as exc:
-        logger.warning("Files API delete failed for {}: {}", file_name, exc)
+def _message_text(content: Any) -> str:
+    """Normalize OpenAI-compatible message content into a plain string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+                continue
+            item_type = getattr(item, "type", None)
+            item_text = getattr(item, "text", None)
+            if item_type == "text" and item_text is not None:
+                parts.append(str(item_text))
+        return "".join(parts)
+    return ""
 
 
-async def _analysis_batch_gemini(
+async def _analysis_batch_nvidia(
     papers: list[dict[str, Any]],
-    client: genai.Client,
+    client: openai.AsyncOpenAI,
     settings: Settings,
 ) -> list[dict[str, Any]]:
-    """Analyze papers using Gemini native SDK.
-
-    - PDF ≤ 10MB → inline (from_bytes)
-    - PDF >  10MB → Files API upload → URI reference → delete after
-    - Sin PDF      → solo abstract como texto
-    """
+    """Analyze papers using NVIDIA's OpenAI-compatible chat API."""
     results: list[dict[str, Any]] = []
 
     for paper in papers:
-        pdf_bytes: bytes = paper.get("pdf_bytes", b"") or b""
         header = _paper_metadata_header(paper)
         arxiv_id = paper.get("arxiv_id", "")
-        size_mb = len(pdf_bytes) / (1024 * 1024)
-
-        # ── Construir la parte PDF del prompt ────────────────────────────────
-        uploaded_file_name: str | None = None  # para borrar después
-
-        if not pdf_bytes:
-            pdf_part: Any = paper.get("abstract", "")
-            source = "abstract only"
-        elif size_mb <= _INLINE_PDF_MB:
-            pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
-            source = f"PDF inline ({size_mb:.1f}MB)"
-        else:
-            # PDF grande → Files API
-            logger.info(
-                "PDF large ({:.1f}MB) for [{}] — uploading via Files API",
-                size_mb, arxiv_id,
-            )
-            uploaded = await asyncio.to_thread(
-                _upload_pdf_blocking, client, pdf_bytes, arxiv_id
-            )
-            if uploaded:
-                pdf_part = types.Part.from_uri(
-                    file_uri=uploaded.uri, mime_type="application/pdf"
-                )
-                uploaded_file_name = uploaded.name
-                source = f"PDF Files API ({size_mb:.1f}MB)"
-                logger.info("Files API upload ready: {} → {}", arxiv_id, uploaded.uri)
-            else:
-                # Fallback a abstract si la subida falla
-                pdf_part = paper.get("abstract", "")
-                source = "abstract only (upload failed)"
-
-        parts: list[Any] = [
-            pdf_part,
+        analysis_text, source = _analysis_input_text(paper)
+        user_prompt = (
             f"Metadatos del paper:\n{header}\n\n"
-            f"Analiza este paper en profundidad basándote en el documento completo.",
-        ]
+            f"Fuente analizada: {source}\n\n"
+            "Analiza este paper en profundidad basandote en el contenido proporcionado. "
+            "Si el texto extraido del PDF esta truncado o incompleto, prioriza no inventar y "
+            "basate en la evidencia disponible.\n\n"
+            f"Contenido del paper:\n{analysis_text}"
+        )
 
-        # ── Intentos de análisis ──────────────────────────────────────────────
         result: dict[str, Any] | None = None
-        for attempt in range(_GEMINI_RETRIES + 1):
+        for attempt in range(_NVIDIA_RETRIES + 1):
             try:
+                request_messages: Any = [
+                    {"role": "system", "content": _JSON_ONLY_SYSTEM},
+                    {"role": "system", "content": _ANALYSIS_SYSTEM},
+                    {"role": "user", "content": user_prompt},
+                ]
                 logger.info(
-                    "Analyzing [{}] with Gemini ({}) attempt {}/{}",
-                    arxiv_id, source, attempt + 1, _GEMINI_RETRIES + 1,
+                    "Analyzing [{}] with NVIDIA ({}) attempt {}/{}",
+                    arxiv_id, source, attempt + 1, _NVIDIA_RETRIES + 1,
                 )
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        client.models.generate_content,
-                        model=settings.gemini_model,
-                        contents=[_ANALYSIS_SYSTEM] + parts,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            max_output_tokens=16384,
-                        ),
+                    client.chat.completions.create(
+                        model=settings.nvidia_model,
+                        messages=request_messages,
+                        temperature=1,
+                        top_p=1,
+                        max_tokens=16384,
+                        extra_body={
+                            "chat_template_kwargs": {
+                                "thinking": True,
+                            }
+                        },
                     ),
-                    timeout=_GEMINI_REQUEST_TIMEOUT,
+                    timeout=_NVIDIA_REQUEST_TIMEOUT,
                 )
-                items = _parse_analysis(response.text or '{"papers":[]}')
+                message = response.choices[0].message if response.choices else None
+                items = _parse_analysis(_message_text(message.content if message else ""))
                 result = next(
                     (item.model_dump() for item in items if item.arxiv_id == arxiv_id),
                     items[0].model_dump() if items else None,
                 )
-                break  # éxito
+                break
             except (json.JSONDecodeError, ValueError) as exc:
                 logger.warning(
-                    "Gemini parse failed for {} (attempt {}/{}): {}",
-                    arxiv_id, attempt + 1, _GEMINI_RETRIES + 1, exc,
+                    "NVIDIA parse failed for {} (attempt {}/{}): {}",
+                    arxiv_id, attempt + 1, _NVIDIA_RETRIES + 1, exc,
                 )
-                if attempt < _GEMINI_RETRIES:
+                if attempt < _NVIDIA_RETRIES:
                     await asyncio.sleep(3 * (attempt + 1))
             except asyncio.TimeoutError:
                 logger.warning(
-                    "Gemini timeout for {} after {}s (attempt {}/{} )",
-                    arxiv_id, _GEMINI_REQUEST_TIMEOUT, attempt + 1, _GEMINI_RETRIES + 1,
+                    "NVIDIA timeout for {} after {}s (attempt {}/{})",
+                    arxiv_id, _NVIDIA_REQUEST_TIMEOUT, attempt + 1, _NVIDIA_RETRIES + 1,
                 )
-                if attempt < _GEMINI_RETRIES:
+                if attempt < _NVIDIA_RETRIES:
                     await asyncio.sleep(3 * (attempt + 1))
+            except openai.RateLimitError as exc:
+                wait = 15 * (attempt + 1)
+                logger.warning(
+                    "NVIDIA rate limit for {} (attempt {}/{}), waiting {}s: {}",
+                    arxiv_id, attempt + 1, _NVIDIA_RETRIES + 1, wait, exc,
+                )
+                if attempt < _NVIDIA_RETRIES:
+                    await asyncio.sleep(wait)
+            except openai.BadRequestError as exc:
+                logger.error("NVIDIA request failed for {}: {}", arxiv_id, exc)
+                break
             except Exception as exc:
-                logger.error("Gemini call failed for {}: {}", arxiv_id, exc)
-                break  # error no recuperable
-
-        # ── Limpiar archivo de Files API si se usó ────────────────────────
-        if uploaded_file_name:
-            await asyncio.to_thread(_delete_file_blocking, client, uploaded_file_name)
-            logger.debug("Files API: deleted {}", uploaded_file_name)
+                logger.error("NVIDIA call failed for {}: {}", arxiv_id, exc)
+                break
 
         results.append(result if result is not None else _empty_analysis(paper))
 
@@ -466,9 +472,10 @@ async def _analysis_batch_groq(
             len(papers), len(papers_text) / 1000,
         )
         try:
+            request_messages: Any = messages
             response = await client.chat.completions.create(
                 model=settings.llm_model,
-                messages=messages,
+                messages=request_messages,
                 max_tokens=8192,
                 response_format={"type": "json_object"},
             )

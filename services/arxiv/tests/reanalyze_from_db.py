@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from google import genai
 from loguru import logger
+from openai import AsyncOpenAI
 
 from arxiv_worker.client import _download_pdfs
-from arxiv_worker.paper_analyzer import _analysis_batch_gemini, _analysis_batch_groq
+from arxiv_worker.paper_analyzer import _analysis_batch_groq, _analysis_batch_nvidia
 from shared.config import get_settings
 from shared.storage.obsidian import write_arxiv_paper
 
@@ -90,16 +90,18 @@ async def _run(limit: int | None, wipe_notes: bool) -> None:
     pdf_ready = sum(1 for paper in papers if paper.get("pdf_bytes"))
     logger.info("PDF ready for {}/{} stored papers", pdf_ready, len(papers))
 
-    if settings.gemini_api_key:
-        logger.info("Reanalyzing with Gemini {}", settings.gemini_model)
-        analyses = await _analysis_batch_gemini(
+    if settings.nvidia_api_key:
+        logger.info("Reanalyzing with NVIDIA {}", settings.nvidia_model)
+        analyses = await _analysis_batch_nvidia(
             papers,
-            genai.Client(api_key=settings.gemini_api_key),
+            AsyncOpenAI(
+                api_key=settings.nvidia_api_key,
+                base_url=settings.nvidia_base_url,
+            ),
             settings,
         )
     else:
-        logger.warning("GEMINI_API_KEY missing, falling back to Groq abstract analysis")
-        from openai import AsyncOpenAI
+        logger.warning("NVIDIA_API_KEY missing, falling back to Groq abstract analysis")
 
         analyses = await _analysis_batch_groq(
             papers,

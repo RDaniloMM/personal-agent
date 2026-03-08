@@ -31,11 +31,18 @@ class Settings(BaseSettings):
         "text-embedding-3-small", description="OpenAI embedding model"
     )
     embedding_dim: int = Field(1536, description="Embedding dimension")
-    # ── Gemini (paper analysis) ────────────────
-    gemini_api_key: str = Field("", description="Google Gemini API key")
-    gemini_model: str = Field(
-        "gemini-3.1-pro-preview",
-        description="Gemini model for deep paper analysis",
+    # ── NVIDIA (deep paper analysis) ─────────────────
+    nvidia_api_key: str = Field(
+        "",
+        description="NVIDIA API key for deep paper analysis",
+    )
+    nvidia_base_url: str = Field(
+        "https://integrate.api.nvidia.com/v1",
+        description="Base URL for the NVIDIA OpenAI-compatible API",
+    )
+    nvidia_model: str = Field(
+        "moonshotai/kimi-k2.5",
+        description="NVIDIA-hosted model for deep paper analysis",
     )
     # ── PostgreSQL + pgvector ────────────────────────
     database_url: str = Field(..., description="PostgreSQL connection string")

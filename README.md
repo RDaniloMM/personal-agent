@@ -22,13 +22,14 @@ Cada worker es un contenedor independiente con su propio pipeline lineal:
 Crawl / Collect → Triage (LLM) → Analyze (LLM) → Index (pgvector) → Notes (Obsidian)
 ```
 
-**Stack:** Python 3.12 · uv · Groq (GPT-OSS-120b) · Crawl4AI · Playwright · yt-dlp · arxiv.py · PostgreSQL + pgvector · APScheduler · Docker Compose
+**Stack:** Python 3.12 · uv · Groq (GPT-OSS-120b) · NVIDIA (Kimi K2.5) · Crawl4AI · Playwright · yt-dlp · arxiv.py · PostgreSQL + pgvector · APScheduler · Docker Compose
 
 ## Requisitos
 
 - Docker & Docker Compose
 - [uv](https://docs.astral.sh/uv/) (gestor de paquetes, usado dentro de los containers)
 - API key de [Groq](https://console.groq.com/) (LLM)
+- API key de [NVIDIA](https://build.nvidia.com/) (análisis profundo de Arxiv)
 - API key de [OpenAI](https://platform.openai.com/) (embeddings)
 - Servidor Linux con acceso SSH (para deploy)
 
@@ -57,6 +58,7 @@ Ver [.env.example](.env.example) para todas las variables. Las principales:
 | Variable              | Descripción                                               |
 | --------------------- | --------------------------------------------------------- |
 | `LLM_API_KEY`         | API key de Groq                                           |
+| `NVIDIA_API_KEY`      | API key de NVIDIA para análisis profundo de papers        |
 | `EMBEDDING_API_KEY`   | API key de OpenAI (embeddings)                            |
 | `POSTGRES_PASSWORD`   | Password del usuario PostgreSQL interno                   |
 | `DATABASE_URL`        | Cadena de conexión que usan los workers                   |
@@ -90,7 +92,7 @@ docker compose run --rm yt-worker uv run python -m yt_worker.main --run-once
 Cada worker incluye un smoke test que ejecuta el pipeline real con datos mínimos:
 
 ```bash
-docker compose run --rm arxiv-worker uv run python -m tests.test_e2e_arxiv   # ~30s
+docker compose run --rm arxiv-worker uv run python -m tests.test_e2e_arxiv   # ~30s, Groq + NVIDIA
 docker compose run --rm yt-worker uv run python -m tests.test_e2e_yt         # ~20s
 docker compose run --rm fb-worker uv run python -m tests.test_e2e_fb         # ~2 min
 ```
