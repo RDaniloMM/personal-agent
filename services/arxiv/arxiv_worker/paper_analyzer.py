@@ -1,21 +1,21 @@
 """LLM-powered paper analysis: relevance classification & key-point extraction.
 
 Phase 1 (Triage): Groq (fast, cheap) — classifies relevance from abstract only.
-Phase 2 (Analysis): NVIDIA (deep, large context) — PDF text extraction plus
-full paper analysis including APA 7 thesis paragraph generation.
+Phase 2 (Analysis): NVIDIA (deep, large context) — analyzes the full paper
+converted locally to Markdown via PyMuPDF4LLM.
 """
 
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 from typing import Any, Literal
 
 import openai
+import pymupdf
+import pymupdf4llm
 from loguru import logger
 from pydantic import BaseModel, Field
-from pypdf import PdfReader
 
 from shared.config import Settings
 from shared.llm_json import extract_json_payload
@@ -33,10 +33,16 @@ class TriageResponse(BaseModel):
 class AnalysisItem(BaseModel):
     arxiv_id: str
     summary: str = Field(default="", description="3-5 sentence summary in Spanish")
-    conclusions: str = Field(default="", description="Bullet points separated by newlines")
-    contributions: str = Field(default="", description="Bullet points separated by newlines")
+    conclusions: str = Field(
+        default="", description="Bullet points separated by newlines"
+    )
+    contributions: str = Field(
+        default="", description="Bullet points separated by newlines"
+    )
     key_takeaways: str = Field(default="", description="3-5 actionable bullet points")
-    thesis_paragraph: str = Field(default="", description="APA 7 thesis background paragraph in Spanish")
+    thesis_paragraph: str = Field(
+        default="", description="APA 7 thesis background paragraph in Spanish"
+    )
 
 
 class AnalysisResponse(BaseModel):
@@ -62,7 +68,7 @@ Example: {{"papers": [{{"arxiv_id": "2503.00001", "relevance": "high"}}]}}
 No incluyas texto fuera del JSON ni bloques markdown."""
 
 
-_ANALYSIS_SYSTEM = f"""Eres un investigador experto en IA y un académico riguroso. Analiza cada paper EN PROFUNDIDAD basándote en su texto completo.
+_ANALYSIS_SYSTEM = f"""Eres un investigador experto en IA y un académico riguroso. Analiza cada paper EN PROFUNDIDAD basándote en su contenido completo en markdown extraído del PDF.
 
 Devuelve un JSON con clave "papers" conteniendo un array. Cada elemento debe tener:
 
@@ -93,21 +99,25 @@ Ejemplo de formato JSON:
 
 Escribe TODO en español. No incluyas texto fuera del JSON ni bloques markdown."""
 
+
+_ANALYSIS_JSON_SCHEMA_HINT = (
+    '{"papers":[{"arxiv_id":"","summary":"","conclusions":"",'
+    '"contributions":"","key_takeaways":"","thesis_paragraph":""}]}'
+)
+
 _ABSTRACT_LIMIT = 300
 _TRIAGE_BATCH = 20
 _ANALYSIS_BATCH = 1
 _NVIDIA_RETRIES = 2
-_NVIDIA_REQUEST_TIMEOUT = 180
-_PDF_TEXT_CHAR_LIMIT = 120000
-_JSON_ONLY_SYSTEM = (
-    "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
-)
+_NVIDIA_REQUEST_TIMEOUT = 600
+_NVIDIA_TEMPERATURE = 0.2
+_JSON_ONLY_SYSTEM = "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
 
 
 async def analyze_papers(
     papers: list[dict[str, Any]], settings: Settings
 ) -> list[dict[str, Any]]:
-    """Two-phase analysis: Groq triage (fast) → NVIDIA deep analysis (full text)."""
+    """Two-phase analysis: Groq triage (fast) → NVIDIA deep analysis."""
     if not papers:
         return []
 
@@ -134,7 +144,8 @@ async def analyze_papers(
             relevance_map[t["arxiv_id"]] = t.get("relevance", "low")
 
     relevant_papers = [
-        p for p in papers
+        p
+        for p in papers
         if relevance_map.get(p.get("arxiv_id", ""), "low") in ("high", "medium")
     ]
 
@@ -143,7 +154,10 @@ async def analyze_papers(
     low_count = sum(1 for v in relevance_map.values() if v == "low")
     logger.info(
         "Triage: {} high, {} medium, {} low → {} to analyze",
-        high_count, medium_count, low_count, len(relevant_papers),
+        high_count,
+        medium_count,
+        low_count,
+        len(relevant_papers),
     )
 
     if not relevant_papers:
@@ -153,7 +167,9 @@ async def analyze_papers(
     for i in range(0, len(relevant_papers), _ANALYSIS_BATCH):
         batch = relevant_papers[i : i + _ANALYSIS_BATCH]
         if nvidia_client:
-            analyses = await _analysis_batch_nvidia(batch, nvidia_client, settings)
+            analyses = await _analysis_batch_nvidia(
+                batch, nvidia_client, groq_client, settings
+            )
         else:
             analyses = await _analysis_batch_groq(batch, groq_client, settings)
         for a in analyses:
@@ -163,15 +179,20 @@ async def analyze_papers(
     for paper in relevant_papers:
         aid = paper.get("arxiv_id", "")
         analysis = all_analyses.get(aid, {})
-        enriched.append({
-            **paper,
-            **analysis,
-            "relevance": relevance_map.get(aid, "medium"),
-        })
+        enriched.append(
+            {
+                **paper,
+                **analysis,
+                "relevance": relevance_map.get(aid, "medium"),
+            }
+        )
 
     logger.info(
         "Paper analysis complete: {} high, {} medium, {} low → {} enriched",
-        high_count, medium_count, low_count, len(enriched),
+        high_count,
+        medium_count,
+        low_count,
+        len(enriched),
     )
     return enriched
 
@@ -179,7 +200,7 @@ async def analyze_papers(
 def _paper_snippet(p: dict[str, Any], abstract_limit: int = _ABSTRACT_LIMIT) -> str:
     abstract = (p.get("abstract", "") or "")[:abstract_limit]
     cats = ",".join(p.get("categories", []))
-    return f"{p.get('arxiv_id','')}: [{cats}] {p.get('title','')}. {abstract}"
+    return f"{p.get('arxiv_id', '')}: [{cats}] {p.get('title', '')}. {abstract}"
 
 
 def _paper_metadata_header(p: dict[str, Any]) -> str:
@@ -214,7 +235,10 @@ async def _request_json_reply(
     *,
     max_tokens: int,
 ) -> Any:
-    request_messages: Any = [{"role": "system", "content": _JSON_ONLY_SYSTEM}, *messages]
+    request_messages: Any = [
+        {"role": "system", "content": _JSON_ONLY_SYSTEM},
+        *messages,
+    ]
     response = await client.chat.completions.create(
         model=settings.llm_model,
         messages=request_messages,
@@ -245,15 +269,21 @@ async def _triage_batch(
                 max_tokens=1024,
                 response_format={"type": "json_object"},
             )
-            items = _parse_triage(response.choices[0].message.content or '{"papers":[]}')
+            items = _parse_triage(
+                response.choices[0].message.content or '{"papers":[]}'
+            )
             return [item.model_dump() for item in items]
         except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Triage parse/validation failed (attempt {}): {}", attempt + 1, exc)
+            logger.warning(
+                "Triage parse/validation failed (attempt {}): {}", attempt + 1, exc
+            )
         except openai.RateLimitError as exc:
             wait = 15 * (attempt + 1)
             logger.warning(
                 "Groq rate limit hit (attempt {}), waiting {}s: {}",
-                attempt + 1, wait, exc,
+                attempt + 1,
+                wait,
+                exc,
             )
             if attempt < _retries:
                 await asyncio.sleep(wait)
@@ -261,10 +291,13 @@ async def _triage_batch(
         except openai.BadRequestError as exc:
             logger.warning(
                 "Triage JSON generation failed (attempt {}), retrying without response_format: {}",
-                attempt + 1, exc,
+                attempt + 1,
+                exc,
             )
             try:
-                data = await _request_json_reply(client, settings, messages, max_tokens=1024)
+                data = await _request_json_reply(
+                    client, settings, messages, max_tokens=1024
+                )
                 if isinstance(data, list):
                     data = {"papers": data}
                 items = TriageResponse.model_validate(data).papers
@@ -272,77 +305,77 @@ async def _triage_batch(
             except (json.JSONDecodeError, ValueError) as fallback_exc:
                 logger.warning(
                     "Triage fallback parse failed (attempt {}): {}",
-                    attempt + 1, fallback_exc,
+                    attempt + 1,
+                    fallback_exc,
                 )
         except Exception as exc:
             logger.error("Triage LLM call failed: {}", exc)
-            return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "low"} for p in papers]
+            return [
+                {"arxiv_id": p.get("arxiv_id", ""), "relevance": "low"} for p in papers
+            ]
 
         if attempt < _retries:
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(2**attempt)
 
     logger.warning("Triage exhausted {} retries, falling back to medium", _retries + 1)
     return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
 
 
-def _extract_pdf_text(pdf_bytes: bytes, arxiv_id: str) -> str:
-    """Extract plain text from a PDF for chat-completion analysis."""
+def _extract_pdf_markdown(pdf_bytes: bytes, arxiv_id: str) -> str:
+    """Extract full Markdown from a PDF using PyMuPDF4LLM."""
     if not pdf_bytes:
         return ""
 
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:
         logger.warning("PDF open failed for {}: {}", arxiv_id, exc)
         return ""
 
-    chunks: list[str] = []
-    current_chars = 0
+    page_count = doc.page_count
+    try:
+        markdown = (pymupdf4llm.to_markdown(doc) or "").strip()
+    except Exception as exc:
+        logger.warning("PyMuPDF4LLM extraction failed for {}: {}", arxiv_id, exc)
+        return ""
+    finally:
+        doc.close()
 
-    for page_idx, page in enumerate(reader.pages, start=1):
-        try:
-            page_text = (page.extract_text() or "").strip()
-        except Exception as exc:
-            logger.debug("PDF text extraction failed for {} page {}: {}", arxiv_id, page_idx, exc)
-            continue
-
-        if not page_text:
-            continue
-
-        remaining = _PDF_TEXT_CHAR_LIMIT - current_chars
-        if remaining <= 0:
-            break
-
-        page_chunk = page_text[:remaining]
-        chunks.append(page_chunk)
-        current_chars += len(page_chunk)
-
-    if not chunks:
+    if not markdown:
         return ""
 
-    text = "\n\n".join(chunks)
-    if len(text) >= _PDF_TEXT_CHAR_LIMIT:
-        logger.info("PDF text for {} truncated to {} chars", arxiv_id, _PDF_TEXT_CHAR_LIMIT)
-    return text
+    logger.info(
+        "PDF markdown extracted for {}: {} pages, {:.0f}K chars",
+        arxiv_id,
+        page_count,
+        len(markdown) / 1000,
+    )
+    return markdown
 
 
-def _analysis_input_text(paper: dict[str, Any]) -> tuple[str, str]:
-    """Build the analysis payload from the PDF when possible, else abstract."""
+def _analysis_input_text(paper: dict[str, Any]) -> tuple[str, str, str]:
+    """Build full analysis input from PDF markdown when available."""
     arxiv_id = paper.get("arxiv_id", "")
     pdf_bytes: bytes = paper.get("pdf_bytes", b"") or b""
-    pdf_text = _extract_pdf_text(pdf_bytes, arxiv_id)
+    markdown = _extract_pdf_markdown(pdf_bytes, arxiv_id)
     abstract = paper.get("abstract", "") or ""
 
-    if pdf_text:
+    if markdown:
         text = (
-            "Resumen/abstract:\n"
+            "Abstract del paper:\n"
             f"{abstract}\n\n"
-            "Texto extraido del PDF:\n"
-            f"{pdf_text}"
+            "Markdown completo extraido desde el PDF:\n"
+            f"{markdown}"
         )
-        return text, f"PDF text ({len(pdf_text) / 1000:.0f}K chars)"
+        return (
+            text,
+            f"PDF markdown completo ({len(markdown) / 1000:.0f}K chars)",
+            abstract,
+        )
 
-    return abstract, "abstract only"
+    if abstract:
+        return abstract, "abstract only", abstract
+    return "", "no text available", abstract
 
 
 def _message_text(content: Any) -> str:
@@ -363,9 +396,136 @@ def _message_text(content: Any) -> str:
     return ""
 
 
+async def _repair_json_with_groq(
+    client: openai.AsyncOpenAI,
+    settings: Settings,
+    raw_content: str,
+    schema_hint: str,
+    *,
+    max_tokens: int,
+) -> Any:
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "Convierte la siguiente salida a JSON valido sin inventar informacion. "
+                "Si falta algun campo, usa string vacia o lista vacia. "
+                f"Debes respetar este esquema: {schema_hint}"
+            ),
+        },
+        {"role": "user", "content": raw_content},
+    ]
+    return await _request_json_reply(client, settings, messages, max_tokens=max_tokens)
+
+
+async def _nvidia_json_completion(
+    client: openai.AsyncOpenAI,
+    groq_client: openai.AsyncOpenAI,
+    settings: Settings,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    timeout: int,
+    schema_hint: str,
+    label: str,
+) -> Any:
+    last_error: Exception | None = None
+
+    for attempt in range(_NVIDIA_RETRIES + 1):
+        try:
+            request_messages: Any = [
+                {"role": "system", "content": _JSON_ONLY_SYSTEM},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=settings.nvidia_model,
+                    messages=request_messages,
+                    temperature=_NVIDIA_TEMPERATURE,
+                    top_p=1,
+                    max_tokens=max_tokens,
+                    extra_body={
+                        "chat_template_kwargs": {
+                            "thinking": True,
+                        }
+                    },
+                ),
+                timeout=timeout,
+            )
+
+            message = response.choices[0].message if response.choices else None
+            raw_content = _message_text(message.content if message else "")
+            if not raw_content:
+                raise json.JSONDecodeError("Empty content", "", 0)
+
+            try:
+                return extract_json_payload(raw_content)
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                repaired = await _repair_json_with_groq(
+                    groq_client,
+                    settings,
+                    raw_content,
+                    schema_hint,
+                    max_tokens=min(4096, max_tokens),
+                )
+                logger.info("{} JSON repaired with Groq", label)
+                return repaired
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+            logger.warning(
+                "{} parse failed (attempt {}/{}): {}",
+                label,
+                attempt + 1,
+                _NVIDIA_RETRIES + 1,
+                exc,
+            )
+            if attempt < _NVIDIA_RETRIES:
+                await asyncio.sleep(3 * (attempt + 1))
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            logger.warning(
+                "{} timed out after {}s (attempt {}/{})",
+                label,
+                timeout,
+                attempt + 1,
+                _NVIDIA_RETRIES + 1,
+            )
+            if attempt < _NVIDIA_RETRIES:
+                await asyncio.sleep(3 * (attempt + 1))
+        except openai.RateLimitError as exc:
+            last_error = exc
+            wait = 15 * (attempt + 1)
+            logger.warning(
+                "{} hit NVIDIA rate limit (attempt {}/{}), waiting {}s: {}",
+                label,
+                attempt + 1,
+                _NVIDIA_RETRIES + 1,
+                wait,
+                exc,
+            )
+            if attempt < _NVIDIA_RETRIES:
+                await asyncio.sleep(wait)
+        except openai.BadRequestError as exc:
+            last_error = exc
+            logger.error("{} request failed: {}", label, exc)
+            break
+        except Exception as exc:
+            last_error = exc
+            logger.error("{} failed: {}", label, exc)
+            break
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"{label} failed without a specific exception")
+
+
 async def _analysis_batch_nvidia(
     papers: list[dict[str, Any]],
     client: openai.AsyncOpenAI,
+    groq_client: openai.AsyncOpenAI,
     settings: Settings,
 ) -> list[dict[str, Any]]:
     """Analyze papers using NVIDIA's OpenAI-compatible chat API."""
@@ -374,80 +534,49 @@ async def _analysis_batch_nvidia(
     for paper in papers:
         header = _paper_metadata_header(paper)
         arxiv_id = paper.get("arxiv_id", "")
-        analysis_text, source = _analysis_input_text(paper)
+        analysis_text, source, abstract = _analysis_input_text(paper)
+
+        if not analysis_text:
+            results.append(_empty_analysis(paper))
+            continue
+
         user_prompt = (
             f"Metadatos del paper:\n{header}\n\n"
             f"Fuente analizada: {source}\n\n"
-            "Analiza este paper en profundidad basandote en el contenido proporcionado. "
-            "Si el texto extraido del PDF esta truncado o incompleto, prioriza no inventar y "
-            "basate en la evidencia disponible.\n\n"
-            f"Contenido del paper:\n{analysis_text}"
+            f"Abstract original:\n{abstract}\n\n"
+            "Analiza este paper en profundidad usando TODO el contenido proporcionado. "
+            "El markdown proviene del PDF completo extraido localmente; preserva la estructura del paper, "
+            "incluyendo titulos, listas, tablas serializadas y cualquier pie de figura que aparezca en el markdown. "
+            "No inventes informacion faltante.\n\n"
+            f"Contenido completo del paper:\n{analysis_text}"
         )
 
-        result: dict[str, Any] | None = None
-        for attempt in range(_NVIDIA_RETRIES + 1):
-            try:
-                request_messages: Any = [
-                    {"role": "system", "content": _JSON_ONLY_SYSTEM},
-                    {"role": "system", "content": _ANALYSIS_SYSTEM},
-                    {"role": "user", "content": user_prompt},
-                ]
-                logger.info(
-                    "Analyzing [{}] with NVIDIA ({}) attempt {}/{}",
-                    arxiv_id, source, attempt + 1, _NVIDIA_RETRIES + 1,
-                )
-                response = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=settings.nvidia_model,
-                        messages=request_messages,
-                        temperature=1,
-                        top_p=1,
-                        max_tokens=16384,
-                        extra_body={
-                            "chat_template_kwargs": {
-                                "thinking": True,
-                            }
-                        },
-                    ),
-                    timeout=_NVIDIA_REQUEST_TIMEOUT,
-                )
-                message = response.choices[0].message if response.choices else None
-                items = _parse_analysis(_message_text(message.content if message else ""))
-                result = next(
-                    (item.model_dump() for item in items if item.arxiv_id == arxiv_id),
-                    items[0].model_dump() if items else None,
-                )
-                break
-            except (json.JSONDecodeError, ValueError) as exc:
-                logger.warning(
-                    "NVIDIA parse failed for {} (attempt {}/{}): {}",
-                    arxiv_id, attempt + 1, _NVIDIA_RETRIES + 1, exc,
-                )
-                if attempt < _NVIDIA_RETRIES:
-                    await asyncio.sleep(3 * (attempt + 1))
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "NVIDIA timeout for {} after {}s (attempt {}/{})",
-                    arxiv_id, _NVIDIA_REQUEST_TIMEOUT, attempt + 1, _NVIDIA_RETRIES + 1,
-                )
-                if attempt < _NVIDIA_RETRIES:
-                    await asyncio.sleep(3 * (attempt + 1))
-            except openai.RateLimitError as exc:
-                wait = 15 * (attempt + 1)
-                logger.warning(
-                    "NVIDIA rate limit for {} (attempt {}/{}), waiting {}s: {}",
-                    arxiv_id, attempt + 1, _NVIDIA_RETRIES + 1, wait, exc,
-                )
-                if attempt < _NVIDIA_RETRIES:
-                    await asyncio.sleep(wait)
-            except openai.BadRequestError as exc:
-                logger.error("NVIDIA request failed for {}: {}", arxiv_id, exc)
-                break
-            except Exception as exc:
-                logger.error("NVIDIA call failed for {}: {}", arxiv_id, exc)
-                break
+        try:
+            logger.info("Analyzing [{}] with NVIDIA using {}", arxiv_id, source)
+            analysis_data = await _nvidia_json_completion(
+                client,
+                groq_client,
+                settings,
+                system_prompt=_ANALYSIS_SYSTEM,
+                user_prompt=user_prompt,
+                max_tokens=8192,
+                timeout=_NVIDIA_REQUEST_TIMEOUT,
+                schema_hint=_ANALYSIS_JSON_SCHEMA_HINT,
+                label=f"NVIDIA final analysis for {arxiv_id}",
+            )
+            if isinstance(analysis_data, list):
+                analysis_data = {"papers": analysis_data}
 
-        results.append(result if result is not None else _empty_analysis(paper))
+            items = AnalysisResponse.model_validate(analysis_data).papers
+            result = next(
+                (item.model_dump() for item in items if item.arxiv_id == arxiv_id),
+                items[0].model_dump() if items else _empty_analysis(paper),
+            )
+            results.append(result)
+        except Exception as exc:
+            logger.error("NVIDIA analysis failed for {}: {}", arxiv_id, exc)
+            fallback = await _analysis_batch_groq([paper], groq_client, settings)
+            results.append(fallback[0] if fallback else _empty_analysis(paper))
 
     return results
 
@@ -469,7 +598,8 @@ async def _analysis_batch_groq(
     try:
         logger.info(
             "Analyzing {} paper(s) with Groq fallback ({:.0f}K chars)",
-            len(papers), len(papers_text) / 1000,
+            len(papers),
+            len(papers_text) / 1000,
         )
         try:
             request_messages: Any = messages
@@ -479,10 +609,14 @@ async def _analysis_batch_groq(
                 max_tokens=8192,
                 response_format={"type": "json_object"},
             )
-            items = _parse_analysis(response.choices[0].message.content or '{"papers":[]}')
+            items = _parse_analysis(
+                response.choices[0].message.content or '{"papers":[]}'
+            )
         except openai.BadRequestError as exc:
             logger.warning("Groq analysis JSON fallback triggered: {}", exc)
-            data = await _request_json_reply(client, settings, messages, max_tokens=8192)
+            data = await _request_json_reply(
+                client, settings, messages, max_tokens=8192
+            )
             if isinstance(data, list):
                 data = {"papers": data}
             items = AnalysisResponse.model_validate(data).papers

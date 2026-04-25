@@ -48,3 +48,6 @@ cookies.json
 dist/
 build/
 *.egg-info/
+
+# Local agent registry
+.atl/

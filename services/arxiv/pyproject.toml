@@ -8,7 +8,8 @@ dependencies = [
     "arxiv>=2.4.1",
     "apscheduler>=3.11.2,<4",
     "httpx>=0.28.1",
-    "pypdf>=5.4.0",
+    "pymupdf>=1.27.1",
+    "pymupdf4llm>=0.3.4",
 ]
 
 [tool.uv.sources]
