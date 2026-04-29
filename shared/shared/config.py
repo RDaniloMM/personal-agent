@@ -48,6 +48,10 @@ class Settings(BaseSettings):
         "deepseek",
         description="Preferred OpenRouter provider for deep paper analysis",
     )
+    openrouter_triage_model: str = Field(
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        description="OpenRouter model for paper triage (cheap/fast)",
+    )
     # ── PostgreSQL + pgvector ────────────────────────
     database_url: str = Field(..., description="PostgreSQL connection string")
 

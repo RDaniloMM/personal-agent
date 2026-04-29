@@ -61,19 +61,23 @@ RESEARCH_INTERESTS = """\
 """
 
 
-_TRIAGE_SYSTEM = f"""Score each paper's relevance to these interests:
+_TRIAGE_SYSTEM = f"""Clasifica la relevancia de cada paper según estos intereses de investigación:
 {RESEARCH_INTERESTS}
 
-Return exactly one line per paper using this format:
-arxiv_id|high
-arxiv_id|medium
-arxiv_id|low
+DEBES responder ÚNICAMENTE con una lista de líneas en texto plano, una por cada paper, usando ESTE FORMATO EXACTO:
+arxiv_id|relevance
 
-Rules:
-- keep the same arxiv_id from the input
-- use only high, medium, or low
-- output one line per paper and nothing else
-- no JSON, no markdown, no explanations"""
+EJEMPLO DE RESPUESTA:
+2401.00001v1|high
+2401.00002v1|medium
+2401.00003v1|low
+
+REGLAS ESTRICTAS:
+1. Mantén el arxiv_id EXACTAMENTE igual al proporcionado en el input.
+2. La relevancia DEBE ser una de estas tres palabras en inglés: high, medium, low.
+3. NO uses formato JSON, NO uses bloques de código markdown (```).
+4. NO agregues saludos, introducciones, explicaciones, ni etiquetas de pensamiento (como <think>).
+5. Cada línea debe contener solo el ID y la relevancia separados por un pipe (|)."""
 
 _TRIAGE_JSON_SYSTEM = f"""Score each paper's relevance to these interests:
 {RESEARCH_INTERESTS}
@@ -128,7 +132,7 @@ _ANALYSIS_RETRIES = 2
 _ANALYSIS_REQUEST_TIMEOUT = 600
 _JSON_ONLY_SYSTEM = "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
 _TRIAGE_LINE_RE = re.compile(
-    r"(?P<arxiv_id>\d{4}\.\d{4,5}(?:v\d+)?)\s*[:|,;-]\s*(?P<relevance>high|medium|low)",
+    r"(?P<arxiv_id>\d{4}\.\d{4,5}(?:v\d+)?).*?(?P<relevance>\b(?:high|medium|low)\b)",
     re.IGNORECASE,
 )
 
@@ -146,8 +150,13 @@ async def analyze_papers(
     )
 
     analysis_client: openai.AsyncOpenAI | None = None
+    triage_fallback_client: openai.AsyncOpenAI | None = None
     if settings.openrouter_api_key:
         analysis_client = openai.AsyncOpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+        )
+        triage_fallback_client = openai.AsyncOpenAI(
             api_key=settings.openrouter_api_key,
             base_url=settings.openrouter_base_url,
         )
@@ -164,7 +173,13 @@ async def analyze_papers(
     relevance_map: dict[str, str] = {}
     for i in range(0, len(papers), _TRIAGE_BATCH):
         batch = papers[i : i + _TRIAGE_BATCH]
-        triage = await _triage_batch(batch, groq_client, settings)
+        triage = await _triage_batch(
+            batch,
+            groq_client,
+            settings,
+            fallback_client=triage_fallback_client,
+            fallback_model=settings.openrouter_triage_model,
+        )
         for t in triage:
             relevance_map[t["arxiv_id"]] = t.get("relevance", "low")
 
@@ -246,12 +261,18 @@ def _parse_triage(content: str) -> list[TriageItem]:
     return TriageResponse.model_validate(data).papers
 
 
+def _base_id(arxiv_id: str) -> str:
+    """Remove version suffix (e.g., 'v1') from an arxiv ID."""
+    return arxiv_id.split("v")[0] if "v" in arxiv_id else arxiv_id
+
 def _parse_triage_lines(
     content: str,
     expected_ids: set[str],
 ) -> list[TriageItem]:
     items: list[TriageItem] = []
     seen_ids: set[str] = set()
+    base_to_original = {_base_id(eid): eid for eid in expected_ids}
+    logger.info("Raw LLM Triage content:\n{}", content)
 
     for raw_line in content.splitlines():
         line = raw_line.strip().strip("`")
@@ -262,16 +283,20 @@ def _parse_triage_lines(
         if not match:
             continue
 
-        arxiv_id = match.group("arxiv_id")
-        relevance = match.group("relevance").lower()
-        if arxiv_id not in expected_ids or arxiv_id in seen_ids:
+        raw_arxiv_id = match.group("arxiv_id")
+        base_arxiv_id = _base_id(raw_arxiv_id)
+        
+        # Resolve to original ID that has the exact version
+        original_id = base_to_original.get(base_arxiv_id)
+        if not original_id or original_id in seen_ids:
             continue
 
-        items.append(TriageItem(arxiv_id=arxiv_id, relevance=relevance))
-        seen_ids.add(arxiv_id)
+        relevance = match.group("relevance").lower()
+        items.append(TriageItem(arxiv_id=original_id, relevance=relevance))
+        seen_ids.add(original_id)
 
     if not items:
-        raise ValueError("No triage lines were parsed")
+        raise ValueError(f"No triage lines were parsed from: {content!r}")
 
     return items
 
@@ -348,6 +373,8 @@ async def _triage_batch(
     settings: Settings,
     *,
     _retries: int = 2,
+    fallback_client: openai.AsyncOpenAI | None = None,
+    fallback_model: str = "",
 ) -> list[dict[str, Any]]:
     papers_text = "\n".join(_paper_snippet(p) for p in papers)
     messages: list[dict[str, Any]] = [
@@ -364,12 +391,22 @@ async def _triage_batch(
             response = await client.chat.completions.create(
                 model=settings.llm_model,
                 messages=messages,
-                max_tokens=512,
+                max_tokens=1024,
             )
-            return _parse_triage_response(
-                response.choices[0].message.content or "",
-                papers,
-            )
+            msg = response.choices[0].message
+            content = msg.content or ""
+            if not content.strip() and hasattr(msg, "reasoning"):
+                content = msg.reasoning or ""
+                logger.debug(
+                    "Groq triage used reasoning field ({} chars)", len(content)
+                )
+            if not content.strip():
+                logger.warning(
+                    "Groq triage returned empty content. Full message: {}",
+                    msg.model_dump(),
+                )
+                raise ValueError("Empty content from Groq triage")
+            return _parse_triage_response(content, papers)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning(
                 "Triage parse/validation failed (attempt {}): {}", attempt + 1, exc
@@ -413,6 +450,26 @@ async def _triage_batch(
 
         if attempt < _retries:
             await asyncio.sleep(2**attempt)
+
+    if fallback_client and fallback_model:
+        logger.info(
+            "Groq triage exhausted, falling back to OpenRouter model {}",
+            fallback_model,
+        )
+        try:
+            response = await fallback_client.chat.completions.create(
+                model=fallback_model,
+                messages=messages,
+                max_tokens=1024,
+            )
+            msg = response.choices[0].message
+            content = msg.content or ""
+            if not content.strip() and hasattr(msg, "reasoning"):
+                content = msg.reasoning or ""
+            logger.info("OpenRouter fallback triage content:\n{}", content)
+            return _parse_triage_response(content, papers)
+        except Exception as exc:
+            logger.error("OpenRouter triage fallback failed: {}", exc)
 
     logger.warning("Triage exhausted {} retries, falling back to medium", _retries + 1)
     return [{"arxiv_id": p.get("arxiv_id", ""), "relevance": "medium"} for p in papers]
