@@ -111,7 +111,7 @@ async def _download_pdf(url: str) -> bytes | None:
 async def _download_pdfs(papers: list[dict[str, Any]]) -> None:
     """Download PDFs and store raw bytes in each paper dict.
 
-    The raw PDF bytes are later converted to text for NVIDIA analysis.
+    The raw PDF bytes are later converted to text for deep paper analysis.
     """
     import asyncio
 

@@ -31,18 +31,22 @@ class Settings(BaseSettings):
         "text-embedding-3-small", description="OpenAI embedding model"
     )
     embedding_dim: int = Field(1536, description="Embedding dimension")
-    # ── NVIDIA (deep paper analysis) ─────────────────
-    nvidia_api_key: str = Field(
+    # ── OpenRouter / DeepSeek (deep paper analysis) ─────────────────
+    openrouter_api_key: str = Field(
         "",
-        description="NVIDIA API key for deep paper analysis",
+        description="OpenRouter API key for deep paper analysis",
     )
-    nvidia_base_url: str = Field(
-        "https://integrate.api.nvidia.com/v1",
-        description="Base URL for the NVIDIA OpenAI-compatible API",
+    openrouter_base_url: str = Field(
+        "https://openrouter.ai/api/v1",
+        description="Base URL for the OpenRouter OpenAI-compatible API",
     )
-    nvidia_model: str = Field(
-        "moonshotai/kimi-k2.5",
-        description="NVIDIA-hosted model for deep paper analysis",
+    openrouter_model: str = Field(
+        "deepseek/deepseek-v4-pro",
+        description="OpenRouter model for deep paper analysis",
+    )
+    openrouter_provider: str = Field(
+        "deepseek",
+        description="Preferred OpenRouter provider for deep paper analysis",
     )
     # ── PostgreSQL + pgvector ────────────────────────
     database_url: str = Field(..., description="PostgreSQL connection string")

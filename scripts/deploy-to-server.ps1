@@ -74,12 +74,18 @@ if ($Workers -ne "none") {
     foreach ($w in $toBuild) {
         $dockerName = $workerMap[$w]
         Write-Host "Reconstruyendo $dockerName..." -ForegroundColor Cyan
-        ssh $SERVER "cd $REMOTE_BASE && docker compose build $dockerName 2>&1 | tail -5"
+            ssh $SERVER "bash -lc 'set -o pipefail; cd $REMOTE_BASE && podman-compose build $dockerName 2>&1 | tail -5'"
         if ($LASTEXITCODE -eq 0) {
             Write-Host "   OK $dockerName reconstruido" -ForegroundColor Green
 
             Write-Host "Reiniciando $dockerName..." -ForegroundColor Cyan
-            ssh $SERVER "cd $REMOTE_BASE && docker compose up -d $dockerName 2>&1"
+            $containerMap = @{
+                "fb-worker" = "personal-agent-fb"
+                "yt-worker" = "personal-agent-yt"
+                "arxiv-worker" = "personal-agent-arxiv"
+            }
+            $containerName = $containerMap[$dockerName]
+            ssh $SERVER "cd $REMOTE_BASE && podman rm -f $containerName 2>/dev/null; podman-compose up -d --no-deps $dockerName 2>&1"
             Write-Host "   OK $dockerName reiniciado" -ForegroundColor Green
         } else {
             Write-Host "   ERROR construyendo $dockerName" -ForegroundColor Red
@@ -87,11 +93,11 @@ if ($Workers -ne "none") {
     }
 }
 
-# ── Status ───────────────────────────────────────────────────────────────────
+# 🏁 Status ───────────────────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "Estado actual de los contenedores:" -ForegroundColor White
-ssh $SERVER "docker ps --format 'table {{.Names}}\t{{.Status}}' 2>&1"
+ssh $SERVER "podman ps --format 'table {{.Names}}\t{{.Status}}' 2>&1"
 
 Write-Host ""
 Write-Host "Deploy completado" -ForegroundColor Green

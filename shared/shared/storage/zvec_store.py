@@ -14,6 +14,9 @@ from shared.config import Settings
 
 # ── Table names per collection ───────────────────────────────────────────────
 _COLLECTIONS = {"fb_marketplace", "youtube_feed", "arxiv_papers"}
+_HYBRID_RRF_K = 60
+_HYBRID_CANDIDATE_MIN = 25
+_HYBRID_CANDIDATE_MULTIPLIER = 5
 
 
 def _ensure_schema(conn: psycopg.Connection, dim: int) -> None:
@@ -27,6 +30,12 @@ def _ensure_schema(conn: psycopg.Connection, dim: int) -> None:
                 embedding vector({dim}),
                 metadata JSONB NOT NULL DEFAULT '{{}}'
             )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS {name}_text_fts_idx
+            ON {name} USING GIN (to_tsvector('simple', text))
             """
         )
     conn.commit()
@@ -61,6 +70,46 @@ def embed_texts(texts: list[str], settings: Settings) -> list[list[float]]:
         all_embeddings.extend([d.embedding for d in response.data])
 
     return all_embeddings
+
+
+def _document_text(doc: dict[str, Any], text_field: str) -> str:
+    """Build a richer document text for dense + lexical retrieval."""
+
+    parts: list[str] = []
+
+    def add(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, list):
+            text = ", ".join(str(item).strip() for item in value if str(item).strip())
+        else:
+            text = str(value).strip()
+        if text and text not in parts:
+            parts.append(text)
+
+    add(doc.get(text_field, ""))
+    if text_field != "title":
+        add(doc.get("title", ""))
+
+    for field in (
+        "abstract",
+        "summary",
+        "description",
+        "conclusions",
+        "contributions",
+        "key_takeaways",
+        "thesis_paragraph",
+        "location",
+        "channel",
+        "subtitles",
+    ):
+        add(doc.get(field))
+
+    for field in ("authors", "categories", "tags"):
+        add(doc.get(field))
+
+    combined = "\n\n".join(parts)
+    return combined[:20000] if combined else "No text"
 
 
 # ── Lookup helpers ────────────────────────────────────────────────────────────
@@ -114,9 +163,7 @@ def upsert_documents(
     if collection_name not in _COLLECTIONS:
         raise ValueError(f"Unknown collection: {collection_name}")
 
-    texts = [
-        doc.get(text_field, "") or doc.get("title", "No text") for doc in documents
-    ]
+    texts = [_document_text(doc, text_field) for doc in documents]
     embeddings = embed_texts(texts, settings)
 
     conn = _get_connection(settings)
@@ -155,9 +202,11 @@ def query_similar(
     settings: Settings,
     top_k: int = 10,
 ) -> list[dict[str, Any]]:
-    """Query a collection by cosine similarity to a text string."""
+    """Query a collection with hybrid vector + full-text retrieval."""
     if collection_name not in _COLLECTIONS:
         raise ValueError(f"Unknown collection: {collection_name}")
+    if not query_text.strip():
+        return []
 
     query_embedding = embed_texts([query_text], settings)[0]
 
@@ -165,19 +214,79 @@ def query_similar(
     try:
         from numpy import array as np_array
 
+        candidate_k = max(_HYBRID_CANDIDATE_MIN, top_k * _HYBRID_CANDIDATE_MULTIPLIER)
+
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT id, text, metadata, 1 - (embedding <=> %s) AS similarity
-                FROM {collection_name}
-                ORDER BY embedding <=> %s
+                WITH vector_matches AS (
+                    SELECT
+                        id,
+                        text,
+                        metadata,
+                        1 - (embedding <=> %s) AS vector_similarity,
+                        ROW_NUMBER() OVER (ORDER BY embedding <=> %s, id) AS vector_rank
+                    FROM {collection_name}
+                    ORDER BY embedding <=> %s, id
+                    LIMIT %s
+                ),
+                text_matches AS (
+                    SELECT
+                        id,
+                        ts_rank_cd(
+                            to_tsvector('simple', text),
+                            websearch_to_tsquery('simple', %s)
+                        ) AS lexical_score,
+                        ROW_NUMBER() OVER (
+                            ORDER BY ts_rank_cd(
+                                to_tsvector('simple', text),
+                                websearch_to_tsquery('simple', %s)
+                            ) DESC, id
+                        ) AS text_rank
+                    FROM {collection_name}
+                    WHERE to_tsvector('simple', text) @@ websearch_to_tsquery('simple', %s)
+                    LIMIT %s
+                )
+                SELECT
+                    base.id,
+                    base.text,
+                    base.metadata,
+                    COALESCE(v.vector_similarity, 0) AS vector_similarity,
+                    COALESCE(t.lexical_score, 0) AS lexical_score,
+                    COALESCE(1.0 / (%s + v.vector_rank), 0)
+                        + COALESCE(1.0 / (%s + t.text_rank), 0) AS hybrid_score
+                FROM {collection_name} base
+                LEFT JOIN vector_matches v ON v.id = base.id
+                LEFT JOIN text_matches t ON t.id = base.id
+                WHERE v.id IS NOT NULL OR t.id IS NOT NULL
+                ORDER BY hybrid_score DESC, vector_similarity DESC, lexical_score DESC, base.id
                 LIMIT %s
                 """,
-                (np_array(query_embedding), np_array(query_embedding), top_k),
+                (
+                    np_array(query_embedding),
+                    np_array(query_embedding),
+                    np_array(query_embedding),
+                    candidate_k,
+                    query_text,
+                    query_text,
+                    query_text,
+                    candidate_k,
+                    _HYBRID_RRF_K,
+                    _HYBRID_RRF_K,
+                    top_k,
+                ),
             )
             rows = cur.fetchall()
         return [
-            {"id": r[0], "text": r[1], "metadata": r[2], "similarity": float(r[3])}
+            {
+                "id": r[0],
+                "text": r[1],
+                "metadata": r[2],
+                "similarity": float(r[5]),
+                "vector_similarity": float(r[3]),
+                "lexical_score": float(r[4]),
+                "hybrid_score": float(r[5]),
+            }
             for r in rows
         ]
     except Exception as exc:

@@ -1,6 +1,6 @@
 # 🤖 Personal Agent
 
-Agente autónomo de IA que recopila datos de **FB Marketplace**, **YouTube** y **Arxiv**, los analiza con LLM (Groq), los indexa en PostgreSQL + pgvector, y genera notas inteligentes en tu vault de **Obsidian**. Desplegado como microservicios Docker en un servidor casero.
+Agente autónomo de IA que recopila datos de **FB Marketplace**, **YouTube** y **Arxiv**, los analiza con LLM (Groq + OpenRouter/DeepSeek), los indexa en PostgreSQL + pgvector, y genera notas inteligentes en tu vault de **Obsidian**. Desplegado como microservicios con Podman en un servidor casero.
 
 ## Arquitectura
 
@@ -22,14 +22,14 @@ Cada worker es un contenedor independiente con su propio pipeline lineal:
 Crawl / Collect → Triage (LLM) → Analyze (LLM) → Index (pgvector) → Notes (Obsidian)
 ```
 
-**Stack:** Python 3.12 · uv · Groq (GPT-OSS-120b) · NVIDIA (Kimi K2.5) · Crawl4AI · Playwright · yt-dlp · arxiv.py · PostgreSQL + pgvector · APScheduler · Docker Compose
+**Stack:** Python 3.12 · uv · Groq (GPT-OSS-120b) · OpenRouter (DeepSeek V4 Pro) · Crawl4AI · Playwright · yt-dlp · arxiv.py · PostgreSQL + pgvector · APScheduler · Podman Compose
 
 ## Requisitos
 
-- Docker & Docker Compose
+- Podman & podman-compose
 - [uv](https://docs.astral.sh/uv/) (gestor de paquetes, usado dentro de los containers)
 - API key de [Groq](https://console.groq.com/) (LLM)
-- API key de [NVIDIA](https://build.nvidia.com/) (análisis profundo de Arxiv)
+- API key de [OpenRouter](https://openrouter.ai/) (análisis profundo de Arxiv con DeepSeek)
 - API key de [OpenAI](https://platform.openai.com/) (embeddings)
 - Servidor Linux con acceso SSH (para deploy)
 
@@ -44,11 +44,11 @@ cp .env.example .env
 # Editar .env con tus API keys y rutas
 
 # 3. Construir y levantar todos los servicios
-docker compose up -d --build
+podman-compose up -d --build
 
 # 4. Ver estado
-docker compose ps
-docker compose logs -f fb-worker
+podman-compose ps
+podman logs -f personal-agent-fb
 ```
 
 ## Configuración
@@ -58,7 +58,7 @@ Ver [.env.example](.env.example) para todas las variables. Las principales:
 | Variable              | Descripción                                               |
 | --------------------- | --------------------------------------------------------- |
 | `LLM_API_KEY`         | API key de Groq                                           |
-| `NVIDIA_API_KEY`      | API key de NVIDIA para análisis profundo de papers        |
+| `OPENROUTER_API_KEY`  | API key de OpenRouter para análisis profundo de papers    |
 | `EMBEDDING_API_KEY`   | API key de OpenAI (embeddings)                            |
 | `POSTGRES_PASSWORD`   | Password del usuario PostgreSQL interno                   |
 | `DATABASE_URL`        | Cadena de conexión que usan los workers                   |
@@ -82,9 +82,9 @@ Los workers corren como daemons con APScheduler. Horarios por defecto:
 
 ```bash
 # Run-once de un worker específico
-docker compose run --rm fb-worker uv run python -m fb_worker.main --run-once
-docker compose run --rm arxiv-worker uv run python -m arxiv_worker.main --run-once
-docker compose run --rm yt-worker uv run python -m yt_worker.main --run-once
+podman exec personal-agent-fb uv run python -m fb_worker.main --run-once
+podman exec personal-agent-arxiv uv run python -m arxiv_worker.main --run-once
+podman exec personal-agent-yt uv run python -m yt_worker.main --run-once
 ```
 
 ### Tests E2E
@@ -92,9 +92,9 @@ docker compose run --rm yt-worker uv run python -m yt_worker.main --run-once
 Cada worker incluye un smoke test que ejecuta el pipeline real con datos mínimos:
 
 ```bash
-docker compose run --rm arxiv-worker uv run python -m tests.test_e2e_arxiv   # ~30s, Groq + NVIDIA
-docker compose run --rm yt-worker uv run python -m tests.test_e2e_yt         # ~20s
-docker compose run --rm fb-worker uv run python -m tests.test_e2e_fb         # ~2 min
+podman exec personal-agent-arxiv uv run python -m tests.test_e2e_arxiv   # ~30s, Groq + OpenRouter/DeepSeek
+podman exec personal-agent-yt uv run python -m tests.test_e2e_yt         # ~20s
+podman exec personal-agent-fb uv run python -m tests.test_e2e_fb         # ~2 min
 ```
 
 ## Estructura del vault de Obsidian
@@ -129,13 +129,13 @@ Cada nota incluye frontmatter YAML con tags para fácil búsqueda en Obsidian.
 
 ```bash
 # Reconstruir un worker específico
-ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose build --no-cache fb-worker'
+ssh danilo@192.168.100.18 'cd ~/personal-agent && podman-compose build fb-worker'
 
 # Reiniciar workers
-ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose up -d fb-worker arxiv-worker yt-worker'
+ssh danilo@192.168.100.18 'cd ~/personal-agent && podman-compose up -d fb-worker arxiv-worker yt-worker'
 
 # Ver logs en tiempo real
-ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose logs -f fb-worker'
+ssh danilo@192.168.100.18 'podman logs -f personal-agent-fb'
 ```
 
 ## ⚠️ Notas importantes
@@ -143,7 +143,7 @@ ssh danilo@192.168.100.18 'cd ~/personal-agent && docker compose logs -f fb-work
 - **ToS de Facebook/YouTube:** El scraping de estas plataformas puede violar sus términos de servicio. Este proyecto es para **uso personal** únicamente.
 - **Rate limiting:** El agente incluye delays entre requests para evitar bloqueos.
 - **MercadoLibre API:** La API pública de búsqueda puede retornar 403 — el pipeline FB degrada gracefully sin precios de referencia.
-- **pgvector:** Extensión de PostgreSQL para búsqueda vectorial. Se ejecuta como servicio Docker con persistencia en volumen `pgdata`.
+- **pgvector:** Extensión de PostgreSQL para búsqueda vectorial. Se ejecuta como servicio Podman con persistencia en volumen `pgdata`.
 - **Seguridad local:** Postgres queda publicado solo en `127.0.0.1` y las credenciales viven en `.env`, no en `docker-compose.yml`.
 - **OAuth de YouTube:** Guarda `client_secret.json` y `youtube_token.json` dentro de `profiles/`, no en la raíz del repo.
 

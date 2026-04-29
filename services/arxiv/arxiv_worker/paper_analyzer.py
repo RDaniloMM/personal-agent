@@ -1,7 +1,7 @@
 """LLM-powered paper analysis: relevance classification & key-point extraction.
 
 Phase 1 (Triage): Groq (fast, cheap) — classifies relevance from abstract only.
-Phase 2 (Analysis): NVIDIA (deep, large context) — analyzes the full paper
+Phase 2 (Analysis): OpenRouter + DeepSeek (deep, large context) — analyzes the full paper
 converted locally to Markdown via PyMuPDF4LLM.
 """
 
@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import time
 from typing import Any, Literal
 
 import openai
@@ -62,6 +64,20 @@ RESEARCH_INTERESTS = """\
 _TRIAGE_SYSTEM = f"""Score each paper's relevance to these interests:
 {RESEARCH_INTERESTS}
 
+Return exactly one line per paper using this format:
+arxiv_id|high
+arxiv_id|medium
+arxiv_id|low
+
+Rules:
+- keep the same arxiv_id from the input
+- use only high, medium, or low
+- output one line per paper and nothing else
+- no JSON, no markdown, no explanations"""
+
+_TRIAGE_JSON_SYSTEM = f"""Score each paper's relevance to these interests:
+{RESEARCH_INTERESTS}
+
 Return a JSON object with a "papers" key containing an array.
 Each element: {{"arxiv_id":"...","relevance":"high"|"medium"|"low"}}
 Example: {{"papers": [{{"arxiv_id": "2503.00001", "relevance": "high"}}]}}
@@ -108,16 +124,19 @@ _ANALYSIS_JSON_SCHEMA_HINT = (
 _ABSTRACT_LIMIT = 300
 _TRIAGE_BATCH = 20
 _ANALYSIS_BATCH = 1
-_NVIDIA_RETRIES = 2
-_NVIDIA_REQUEST_TIMEOUT = 600
-_NVIDIA_TEMPERATURE = 0.2
+_ANALYSIS_RETRIES = 2
+_ANALYSIS_REQUEST_TIMEOUT = 600
 _JSON_ONLY_SYSTEM = "Responde solo con JSON valido. No incluyas explicaciones, markdown ni bloques de codigo."
+_TRIAGE_LINE_RE = re.compile(
+    r"(?P<arxiv_id>\d{4}\.\d{4,5}(?:v\d+)?)\s*[:|,;-]\s*(?P<relevance>high|medium|low)",
+    re.IGNORECASE,
+)
 
 
 async def analyze_papers(
     papers: list[dict[str, Any]], settings: Settings
 ) -> list[dict[str, Any]]:
-    """Two-phase analysis: Groq triage (fast) → NVIDIA deep analysis."""
+    """Two-phase analysis: Groq triage (fast) → OpenRouter deep analysis."""
     if not papers:
         return []
 
@@ -126,15 +145,21 @@ async def analyze_papers(
         base_url=settings.llm_base_url,
     )
 
-    nvidia_client: openai.AsyncOpenAI | None = None
-    if settings.nvidia_api_key:
-        nvidia_client = openai.AsyncOpenAI(
-            api_key=settings.nvidia_api_key,
-            base_url=settings.nvidia_base_url,
+    analysis_client: openai.AsyncOpenAI | None = None
+    if settings.openrouter_api_key:
+        analysis_client = openai.AsyncOpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
         )
-        logger.info("Using NVIDIA ({}) for deep paper analysis", settings.nvidia_model)
+        logger.info(
+            "Using OpenRouter model {} with provider {} for deep paper analysis",
+            settings.openrouter_model,
+            settings.openrouter_provider,
+        )
     else:
-        logger.warning("No NVIDIA_API_KEY set — falling back to Groq for analysis")
+        logger.warning(
+            "No OPENROUTER_API_KEY set — falling back to Groq for analysis"
+        )
 
     relevance_map: dict[str, str] = {}
     for i in range(0, len(papers), _TRIAGE_BATCH):
@@ -166,9 +191,9 @@ async def analyze_papers(
     all_analyses: dict[str, dict[str, Any]] = {}
     for i in range(0, len(relevant_papers), _ANALYSIS_BATCH):
         batch = relevant_papers[i : i + _ANALYSIS_BATCH]
-        if nvidia_client:
-            analyses = await _analysis_batch_nvidia(
-                batch, nvidia_client, groq_client, settings
+        if analysis_client:
+            analyses = await _analysis_batch_openrouter(
+                batch, analysis_client, groq_client, settings
             )
         else:
             analyses = await _analysis_batch_groq(batch, groq_client, settings)
@@ -221,6 +246,76 @@ def _parse_triage(content: str) -> list[TriageItem]:
     return TriageResponse.model_validate(data).papers
 
 
+def _parse_triage_lines(
+    content: str,
+    expected_ids: set[str],
+) -> list[TriageItem]:
+    items: list[TriageItem] = []
+    seen_ids: set[str] = set()
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip().strip("`")
+        if not line:
+            continue
+
+        match = _TRIAGE_LINE_RE.search(line)
+        if not match:
+            continue
+
+        arxiv_id = match.group("arxiv_id")
+        relevance = match.group("relevance").lower()
+        if arxiv_id not in expected_ids or arxiv_id in seen_ids:
+            continue
+
+        items.append(TriageItem(arxiv_id=arxiv_id, relevance=relevance))
+        seen_ids.add(arxiv_id)
+
+    if not items:
+        raise ValueError("No triage lines were parsed")
+
+    return items
+
+
+def _normalize_triage_items(
+    papers: list[dict[str, Any]],
+    items: list[TriageItem],
+) -> list[dict[str, Any]]:
+    by_id = {item.arxiv_id: item.relevance for item in items}
+    normalized: list[dict[str, Any]] = []
+    missing_ids: list[str] = []
+
+    for paper in papers:
+        arxiv_id = paper.get("arxiv_id", "")
+        relevance = by_id.get(arxiv_id)
+        if relevance is None:
+            relevance = "medium"
+            missing_ids.append(arxiv_id)
+        normalized.append({"arxiv_id": arxiv_id, "relevance": relevance})
+
+    if missing_ids:
+        logger.warning(
+            "Triage omitted {} paper(s); defaulting them to medium: {}",
+            len(missing_ids),
+            ", ".join(missing_ids[:5]),
+        )
+
+    return normalized
+
+
+def _parse_triage_response(
+    content: str,
+    papers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    expected_ids = {paper.get("arxiv_id", "") for paper in papers if paper.get("arxiv_id")}
+
+    try:
+        items = _parse_triage(content)
+    except (json.JSONDecodeError, ValueError):
+        items = _parse_triage_lines(content, expected_ids)
+
+    return _normalize_triage_items(papers, items)
+
+
 def _parse_analysis(content: str) -> list[AnalysisItem]:
     data = extract_json_payload(content)
     if isinstance(data, list):
@@ -259,20 +354,22 @@ async def _triage_batch(
         {"role": "system", "content": _TRIAGE_SYSTEM},
         {"role": "user", "content": papers_text},
     ]
+    json_fallback_messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _TRIAGE_JSON_SYSTEM},
+        {"role": "user", "content": papers_text},
+    ]
 
     for attempt in range(_retries + 1):
         try:
-            request_messages: Any = messages
             response = await client.chat.completions.create(
                 model=settings.llm_model,
-                messages=request_messages,
-                max_tokens=1024,
-                response_format={"type": "json_object"},
+                messages=messages,
+                max_tokens=512,
             )
-            items = _parse_triage(
-                response.choices[0].message.content or '{"papers":[]}'
+            return _parse_triage_response(
+                response.choices[0].message.content or "",
+                papers,
             )
-            return [item.model_dump() for item in items]
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning(
                 "Triage parse/validation failed (attempt {}): {}", attempt + 1, exc
@@ -290,18 +387,18 @@ async def _triage_batch(
             continue
         except openai.BadRequestError as exc:
             logger.warning(
-                "Triage JSON generation failed (attempt {}), retrying without response_format: {}",
+                "Triage request failed (attempt {}), retrying with JSON-only fallback: {}",
                 attempt + 1,
                 exc,
             )
             try:
                 data = await _request_json_reply(
-                    client, settings, messages, max_tokens=1024
+                    client, settings, json_fallback_messages, max_tokens=1024
                 )
                 if isinstance(data, list):
                     data = {"papers": data}
                 items = TriageResponse.model_validate(data).papers
-                return [item.model_dump() for item in items]
+                return _normalize_triage_items(papers, items)
             except (json.JSONDecodeError, ValueError) as fallback_exc:
                 logger.warning(
                     "Triage fallback parse failed (attempt {}): {}",
@@ -396,6 +493,13 @@ def _message_text(content: Any) -> str:
     return ""
 
 
+def _estimate_tokens(text: str) -> int:
+    """Cheap token estimate for debug progress logs."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
 async def _repair_json_with_groq(
     client: openai.AsyncOpenAI,
     settings: Settings,
@@ -418,7 +522,17 @@ async def _repair_json_with_groq(
     return await _request_json_reply(client, settings, messages, max_tokens=max_tokens)
 
 
-async def _nvidia_json_completion(
+def _analysis_provider_extra_body(settings: Settings) -> dict[str, Any]:
+    return {
+        "provider": {
+            "only": [settings.openrouter_provider],
+            "allow_fallbacks": False,
+            "data_collection": "allow",
+        }
+    }
+
+
+async def _analysis_json_completion(
     client: openai.AsyncOpenAI,
     groq_client: openai.AsyncOpenAI,
     settings: Settings,
@@ -432,33 +546,92 @@ async def _nvidia_json_completion(
 ) -> Any:
     last_error: Exception | None = None
 
-    for attempt in range(_NVIDIA_RETRIES + 1):
+    for attempt in range(_ANALYSIS_RETRIES + 1):
         try:
             request_messages: Any = [
-                {"role": "system", "content": _JSON_ONLY_SYSTEM},
-                {"role": "system", "content": system_prompt},
+                {
+                    "role": "system",
+                    "content": f"{_JSON_ONLY_SYSTEM}\n\n{system_prompt}",
+                },
                 {"role": "user", "content": user_prompt},
             ]
-            response = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=settings.nvidia_model,
-                    messages=request_messages,
-                    temperature=_NVIDIA_TEMPERATURE,
-                    top_p=1,
-                    max_tokens=max_tokens,
-                    extra_body={
-                        "chat_template_kwargs": {
-                            "thinking": True,
-                        }
-                    },
-                ),
-                timeout=timeout,
+            prompt_estimate = sum(
+                _estimate_tokens(message.get("content", ""))
+                for message in request_messages
+                if isinstance(message.get("content", ""), str)
+            )
+            logger.info(
+                "{} started | prompt_est~{} tok | max_tokens={} | provider={}",
+                label,
+                prompt_estimate,
+                max_tokens,
+                settings.openrouter_provider,
             )
 
-            message = response.choices[0].message if response.choices else None
-            raw_content = _message_text(message.content if message else "")
+            async def _collect_stream() -> tuple[str, Any]:
+                stream = await client.chat.completions.create(
+                    model=settings.openrouter_model,
+                    messages=request_messages,
+                    temperature=0.3,
+                    top_p=1,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    extra_body=_analysis_provider_extra_body(settings),
+                )
+
+                content_parts: list[str] = []
+                usage: Any = None
+                started_at = time.monotonic()
+                last_log_at = started_at
+
+                async for chunk in stream:
+                    if getattr(chunk, "usage", None) is not None:
+                        usage = chunk.usage
+
+                    choice = chunk.choices[0] if chunk.choices else None
+                    delta = getattr(choice, "delta", None)
+                    delta_text = _message_text(delta.content if delta else "")
+                    if delta_text:
+                        content_parts.append(delta_text)
+
+                    now = time.monotonic()
+                    if now - last_log_at >= 5:
+                        generated_text = "".join(content_parts)
+                        logger.info(
+                            "{} streaming | output_est~{} tok | elapsed={}s",
+                            label,
+                            _estimate_tokens(generated_text),
+                            int(now - started_at),
+                        )
+                        last_log_at = now
+
+                return "".join(content_parts), usage
+
+            raw_content, usage = await asyncio.wait_for(_collect_stream(), timeout=timeout)
             if not raw_content:
                 raise json.JSONDecodeError("Empty content", "", 0)
+
+            if usage is not None:
+                reasoning_tokens = getattr(
+                    getattr(usage, "completion_tokens_details", None),
+                    "reasoning_tokens",
+                    0,
+                ) or 0
+                logger.info(
+                    "{} usage | prompt={} | completion={} | reasoning={} | total={}",
+                    label,
+                    getattr(usage, "prompt_tokens", 0),
+                    getattr(usage, "completion_tokens", 0),
+                    reasoning_tokens,
+                    getattr(usage, "total_tokens", 0),
+                )
+            else:
+                logger.info(
+                    "{} finished without usage block | output_est~{} tok",
+                    label,
+                    _estimate_tokens(raw_content),
+                )
 
             try:
                 return extract_json_payload(raw_content)
@@ -479,10 +652,10 @@ async def _nvidia_json_completion(
                 "{} parse failed (attempt {}/{}): {}",
                 label,
                 attempt + 1,
-                _NVIDIA_RETRIES + 1,
+                _ANALYSIS_RETRIES + 1,
                 exc,
             )
-            if attempt < _NVIDIA_RETRIES:
+            if attempt < _ANALYSIS_RETRIES:
                 await asyncio.sleep(3 * (attempt + 1))
         except asyncio.TimeoutError as exc:
             last_error = exc
@@ -491,22 +664,22 @@ async def _nvidia_json_completion(
                 label,
                 timeout,
                 attempt + 1,
-                _NVIDIA_RETRIES + 1,
+                _ANALYSIS_RETRIES + 1,
             )
-            if attempt < _NVIDIA_RETRIES:
+            if attempt < _ANALYSIS_RETRIES:
                 await asyncio.sleep(3 * (attempt + 1))
         except openai.RateLimitError as exc:
             last_error = exc
             wait = 15 * (attempt + 1)
             logger.warning(
-                "{} hit NVIDIA rate limit (attempt {}/{}), waiting {}s: {}",
+                "{} hit OpenRouter rate limit (attempt {}/{}), waiting {}s: {}",
                 label,
                 attempt + 1,
-                _NVIDIA_RETRIES + 1,
+                _ANALYSIS_RETRIES + 1,
                 wait,
                 exc,
             )
-            if attempt < _NVIDIA_RETRIES:
+            if attempt < _ANALYSIS_RETRIES:
                 await asyncio.sleep(wait)
         except openai.BadRequestError as exc:
             last_error = exc
@@ -522,13 +695,13 @@ async def _nvidia_json_completion(
     raise RuntimeError(f"{label} failed without a specific exception")
 
 
-async def _analysis_batch_nvidia(
+async def _analysis_batch_openrouter(
     papers: list[dict[str, Any]],
     client: openai.AsyncOpenAI,
     groq_client: openai.AsyncOpenAI,
     settings: Settings,
 ) -> list[dict[str, Any]]:
-    """Analyze papers using NVIDIA's OpenAI-compatible chat API."""
+    """Analyze papers using OpenRouter's OpenAI-compatible chat API."""
     results: list[dict[str, Any]] = []
 
     for paper in papers:
@@ -552,17 +725,22 @@ async def _analysis_batch_nvidia(
         )
 
         try:
-            logger.info("Analyzing [{}] with NVIDIA using {}", arxiv_id, source)
-            analysis_data = await _nvidia_json_completion(
+            logger.info(
+                "Analyzing [{}] with OpenRouter/{} using {}",
+                arxiv_id,
+                settings.openrouter_provider,
+                source,
+            )
+            analysis_data = await _analysis_json_completion(
                 client,
                 groq_client,
                 settings,
                 system_prompt=_ANALYSIS_SYSTEM,
                 user_prompt=user_prompt,
                 max_tokens=8192,
-                timeout=_NVIDIA_REQUEST_TIMEOUT,
+                timeout=_ANALYSIS_REQUEST_TIMEOUT,
                 schema_hint=_ANALYSIS_JSON_SCHEMA_HINT,
-                label=f"NVIDIA final analysis for {arxiv_id}",
+                label=f"OpenRouter final analysis for {arxiv_id}",
             )
             if isinstance(analysis_data, list):
                 analysis_data = {"papers": analysis_data}
@@ -574,7 +752,7 @@ async def _analysis_batch_nvidia(
             )
             results.append(result)
         except Exception as exc:
-            logger.error("NVIDIA analysis failed for {}: {}", arxiv_id, exc)
+            logger.error("OpenRouter analysis failed for {}: {}", arxiv_id, exc)
             fallback = await _analysis_batch_groq([paper], groq_client, settings)
             results.append(fallback[0] if fallback else _empty_analysis(paper))
 
@@ -596,26 +774,39 @@ async def _analysis_batch_groq(
         {"role": "user", "content": f"Analiza estos papers:\n{papers_text}"},
     ]
     try:
+        prompt_estimate = sum(
+            _estimate_tokens(message.get("content", ""))
+            for message in messages
+            if isinstance(message.get("content", ""), str)
+        )
         logger.info(
-            "Analyzing {} paper(s) with Groq fallback ({:.0f}K chars)",
+            "Analyzing {} paper(s) with Groq fallback ({:.0f}K chars, prompt_est~{} tok)",
             len(papers),
             len(papers_text) / 1000,
+            prompt_estimate,
         )
         try:
             request_messages: Any = messages
             response = await client.chat.completions.create(
                 model=settings.llm_model,
                 messages=request_messages,
-                max_tokens=8192,
+                max_tokens=4096,
                 response_format={"type": "json_object"},
             )
+            if getattr(response, "usage", None) is not None:
+                logger.info(
+                    "Groq fallback usage | prompt={} | completion={} | total={}",
+                    getattr(response.usage, "prompt_tokens", 0),
+                    getattr(response.usage, "completion_tokens", 0),
+                    getattr(response.usage, "total_tokens", 0),
+                )
             items = _parse_analysis(
                 response.choices[0].message.content or '{"papers":[]}'
             )
         except openai.BadRequestError as exc:
             logger.warning("Groq analysis JSON fallback triggered: {}", exc)
             data = await _request_json_reply(
-                client, settings, messages, max_tokens=8192
+                client, settings, messages, max_tokens=4096
             )
             if isinstance(data, list):
                 data = {"papers": data}

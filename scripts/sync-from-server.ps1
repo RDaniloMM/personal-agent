@@ -80,7 +80,7 @@ function Sync-VaultFolder {
         New-Item -ItemType Directory -Path $LocalPath -Force | Out-Null
     }
 
-    $remoteFiles = ssh $SERVER "ls $RemotePath/ 2>/dev/null" 2>$null
+    $remoteFiles = ssh $SERVER "find $RemotePath -type f 2>/dev/null | sed 's#^$RemotePath/##'" 2>$null
     if (-not $remoteFiles) {
         Write-Host "   SKIP $Label - vacio" -ForegroundColor DarkGray
         return @{
@@ -93,10 +93,14 @@ function Sync-VaultFolder {
     $remoteList = $remoteFiles -split "`n" | Where-Object { $_.Trim() -ne "" }
 
     if ($Overwrite) {
-        Get-ChildItem -Path $LocalPath -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        Get-ChildItem -Path $LocalPath -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 
         Write-Host "   REPLACE $Label - copiando $($remoteList.Count) archivos..." -ForegroundColor Yellow
-        scp -r "${SERVER}:${RemotePath}/*" "$LocalPath/" 2>$null
+        $localParent = Split-Path -Parent $LocalPath
+        if (-not (Test-Path $localParent)) {
+            New-Item -ItemType Directory -Path $localParent -Force | Out-Null
+        }
+        scp -r "${SERVER}:${RemotePath}" "$localParent/" 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "      OK $($remoteList.Count) archivos copiados" -ForegroundColor Green
             return @{
@@ -134,17 +138,30 @@ function Sync-VaultFolder {
 
     Write-Host "   COPY $Label - descargando $($newFiles.Count) nuevos (de $($remoteList.Count))..." -ForegroundColor Cyan
     $copied = 0
+    $skipped = $remoteList.Count - $newFiles.Count
     foreach ($f in $newFiles) {
-        scp "${SERVER}:${RemotePath}/${f}" "$LocalPath/" 2>$null
+        $targetDir = $LocalPath
+        $relativeParent = Split-Path -Parent $f
+        if ($relativeParent -and $relativeParent -ne ".") {
+            $localDir = Join-Path $LocalPath $relativeParent
+            if (-not (Test-Path $localDir)) {
+                New-Item -ItemType Directory -Path $localDir -Force | Out-Null
+            }
+            $targetDir = $localDir
+        }
+        scp "${SERVER}:${RemotePath}/${f}" "$targetDir/" 2>$null
         if ($LASTEXITCODE -eq 0) {
             $copied++
         }
     }
     Write-Host "      OK $copied archivos nuevos" -ForegroundColor Green
+    if ($copied -lt $newFiles.Count) {
+        Write-Host "      WARN $($newFiles.Count - $copied) archivos no se pudieron copiar; usar -Overwrite para rutas complejas" -ForegroundColor Yellow
+    }
 
     return @{
         New = $copied
-        Skipped = $remoteList.Count - $newFiles.Count
+        Skipped = $skipped
         Replaced = 0
     }
 }

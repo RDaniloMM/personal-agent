@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Autonomous AI agent system that scrapes **FB Marketplace**, **YouTube**, and **Arxiv**, analyzes content via LLM (Groq), and writes structured notes to an **Obsidian vault**. Deployed as Docker microservices on a home server (`danilo@192.168.100.18`, Moquegua, Perú).
+Autonomous AI agent system that scrapes **FB Marketplace**, **YouTube**, and **Arxiv**, analyzes content via LLM (Groq + OpenRouter/DeepSeek), and writes structured notes to an **Obsidian vault**. Deployed as Podman microservices on a home server (`danilo@192.168.100.18`, Moquegua, Perú).
 
 ## Architecture
 
@@ -59,7 +59,7 @@ personal-agent/
 | Arxiv        | arxiv.py library (no API key needed)        |
 | Config       | pydantic-settings (`Settings` in config.py) |
 | Packaging    | uv + hatchling                              |
-| Container    | Docker Compose, Python 3.12-slim            |
+| Container    | Podman Compose, Python 3.12-slim            |
 | Notes        | Obsidian vault (markdown + wiki-links)      |
 
 ## Configuration (`.env`)
@@ -67,7 +67,7 @@ personal-agent/
 Required variables:
 
 - `LLM_API_KEY` — Groq API key
-- `NVIDIA_API_KEY` — NVIDIA API key for deep Arxiv analysis
+- `OPENROUTER_API_KEY` — OpenRouter API key for deep Arxiv analysis
 - `EMBEDDING_API_KEY` — OpenAI API key
 - `OBSIDIAN_VAULT_PATH` — Path to the Obsidian vault (inside container: `/app/vault`)
 - `DATABASE_URL` — PostgreSQL connection string
@@ -90,7 +90,7 @@ Required variables:
 
 1. **Collect** — 4 hardcoded queries via `arxiv.py`, configurable `max_results`
 2. **Triage** — Groq classifies relevance as `high`/`medium`/`low` (JSON mode)
-3. **Full analysis** — NVIDIA analyzes extracted PDF text and generates summary, conclusions, contributions, key takeaways
+3. **Full analysis** — OpenRouter routes to DeepSeek for deep analysis of extracted PDF text and generates summary, conclusions, contributions, key takeaways
 4. **Index** — pgvector dedup by `arxiv_id`
 5. **Notes** — Obsidian per-paper notes + LLM idea extraction
 
@@ -105,7 +105,7 @@ Required variables:
 ## LLM Integration Notes
 
 - **Primary model**: `openai/gpt-oss-120b` via Groq (`https://api.groq.com/openai/v1`)
-- **Arxiv deep analysis**: `moonshotai/kimi-k2.5` via NVIDIA (`https://integrate.api.nvidia.com/v1`) using the OpenAI-compatible chat completions API with `extra_body.chat_template_kwargs.thinking=true`
+- **Arxiv deep analysis**: `deepseek/deepseek-v4-pro` via OpenRouter (`https://openrouter.ai/api/v1`) forcing provider `DeepSeek`
 - **JSON mode** (`response_format={"type": "json_object"}`): Used for Groq triage and fallback analysis. **Incompatible with `reasoning_effort` on this model** — do not add `extra_body` with reasoning params when using JSON mode.
 - **Tool use**: Used in `writer.py` (`write_idea_note` tool) and `deal_analyzer.py` (`calculate` tool). `reasoning_effort` works with tool use via `extra_body`.
 - **reasoning_effort**: Applied to `writer.py` calls only (`"medium"` for FB/YT, `"high"` for Arxiv).
@@ -141,7 +141,7 @@ Tests run **inside Docker containers** since each worker has its own dependencie
 # FB Marketplace E2E (~2-3 min, crawls 1 query × 1 location, calls Groq + MercadoLibre)
 docker compose run --rm fb-worker uv run python -m tests.test_e2e_fb
 
-# Arxiv E2E (~30s, fetches 1 paper, calls Groq + NVIDIA for analysis)
+# Arxiv E2E (~30s, fetches 1 paper, calls Groq + OpenRouter/DeepSeek for analysis)
 docker compose run --rm arxiv-worker uv run python -m tests.test_e2e_arxiv
 
 # YouTube E2E (~30s, searches 1 video via yt-dlp, enriches metadata)

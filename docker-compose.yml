@@ -1,6 +1,6 @@
 services:
   db:
-    image: pgvector/pgvector:pg17
+    image: docker.io/pgvector/pgvector:pg17
     container_name: personal-agent-db
     restart: unless-stopped
     environment:

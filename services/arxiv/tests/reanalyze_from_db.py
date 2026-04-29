@@ -13,7 +13,10 @@ from loguru import logger
 from openai import AsyncOpenAI
 
 from arxiv_worker.client import _download_pdfs
-from arxiv_worker.paper_analyzer import _analysis_batch_groq, _analysis_batch_nvidia
+from arxiv_worker.paper_analyzer import (
+    _analysis_batch_groq,
+    _analysis_batch_openrouter,
+)
 from shared.config import get_settings
 from shared.storage.obsidian import write_arxiv_paper
 
@@ -90,22 +93,34 @@ async def _run(limit: int | None, wipe_notes: bool) -> None:
     pdf_ready = sum(1 for paper in papers if paper.get("pdf_bytes"))
     logger.info("PDF ready for {}/{} stored papers", pdf_ready, len(papers))
 
-    if settings.nvidia_api_key:
-        logger.info("Reanalyzing with NVIDIA {}", settings.nvidia_model)
-        analyses = await _analysis_batch_nvidia(
+    groq_client = AsyncOpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+    )
+
+    if settings.openrouter_api_key:
+        logger.info(
+            "Reanalyzing with OpenRouter model {} via provider {}",
+            settings.openrouter_model,
+            settings.openrouter_provider,
+        )
+        analyses = await _analysis_batch_openrouter(
             papers,
             AsyncOpenAI(
-                api_key=settings.nvidia_api_key,
-                base_url=settings.nvidia_base_url,
+                api_key=settings.openrouter_api_key,
+                base_url=settings.openrouter_base_url,
             ),
+            groq_client,
             settings,
         )
     else:
-        logger.warning("NVIDIA_API_KEY missing, falling back to Groq abstract analysis")
+        logger.warning(
+            "OPENROUTER_API_KEY missing, falling back to Groq abstract analysis"
+        )
 
         analyses = await _analysis_batch_groq(
             papers,
-            AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url),
+            groq_client,
             settings,
         )
 
